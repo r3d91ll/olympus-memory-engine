@@ -1,0 +1,168 @@
+# Olympus Memory Engine Configuration
+
+# Available models from Ollama
+models:
+  - id: llama3.1:8b
+    name: Llama 3.1 8B
+    description: Meta's Llama 3.1, good general purpose model
+
+  - id: qwen3:8b
+    name: Qwen 3 8B
+    description: Alibaba's Qwen 3, good coding and reasoning
+
+  - id: mistral:7b
+    name: Mistral 7B
+    description: Mistral AI's 7B model, fast and capable
+
+  - id: qwen2.5-coder:latest
+    name: Qwen 2.5 Coder
+    description: Specialized coding model
+
+  - id: gpt-oss:20b
+    name: GPT-OSS 20B
+    description: Larger open source model
+
+# Embedding model (don't change unless you update the database schema)
+embedding_model: nomic-embed-text
+
+# Default model if none specified
+default_model: llama3.1:8b
+
+# Default agent name
+default_agent: assistant
+
+# Memory settings
+memory:
+  fifo_queue_size: 10  # Number of recent messages to keep in memory
+  archival_search_limit: 5  # Number of memories to return in searches
+  max_tokens: 2048  # Max tokens to generate per response
+  temperature: 0.7  # Sampling temperature
+
+# Pre-configured agents (will be created on startup if they don't exist)
+agents:
+  - name: assistant
+    model: llama3.1:8b
+    description: General purpose assistant agent
+    enable_tools: true
+
+  - name: coder
+    model: qwen2.5-coder:latest
+    description: Specialized coding agent
+    enable_tools: true
+
+  - name: qwen
+    model: qwen3:8b
+    description: Qwen agent for reasoning tasks
+    enable_tools: true
+
+  - name: alice
+    model: llama3.1:8b
+    description: Collaborative agent for experiments
+    enable_tools: true
+
+  - name: bob
+    model: llama3.1:8b
+    description: Collaborative agent for experiments
+    enable_tools: true
+
+# External actors (users/systems that can connect to Olympus)
+external_actors:
+  - actor_id: todd
+    type: human
+    display_name: todd
+    description: human user, primary
+    requires_auth: false
+
+  - actor_id: claude
+    type: ai_assistant
+    display_name: claude
+    description: AI assistant (Anthropic Claude)
+    requires_auth: false
+
+  - actor_id: tester1
+    type: human
+    display_name: tester1
+    description: external tester
+    requires_auth: false
+
+# External actor settings
+external_actor_settings:
+  # Allow creation of new external actors at runtime
+  allow_anonymous: false
+  allow_dynamic_creation: true
+
+# System configuration
+system:
+  log_level: INFO
+  log_dir: logs
+  metrics_dir: metrics
+  output_dir: output
+
+# Database configuration
+database:
+  host: localhost
+  port: 5432
+  database: olympus_memory
+  # user and password read from environment: POSTGRES_USER, POSTGRES_PASSWORD
+
+# Monitoring configuration
+monitoring:
+  prometheus_enabled: true
+  metrics_export_interval: 60  # seconds
+  export_to_file: true  # Export metrics to file for node-exporter
+  pushgateway_url: null  # Set to enable push to Prometheus pushgateway
+
+# Experiment templates
+experiments:
+  - name: collaborative_bug_fixing
+    type: bug_fixing
+    description: Two agents collaborate to fix bugs in code
+    agents:
+      - alice
+      - bob
+    parameters:
+      max_iterations: 10
+      require_tests: true
+      workspace_dir: output/bug_fixing
+    metrics:
+      - function_calls_per_agent
+      - messages_exchanged
+      - time_to_solution
+      - code_quality_score
+    validation:
+      require_passing_tests: true
+      require_original_functionality: true
+
+  - name: api_learning
+    type: api_learning
+    description: Agent learns to use an unfamiliar API through documentation
+    agents:
+      - coder
+    parameters:
+      max_attempts: 5
+      allow_internet: true
+      workspace_dir: output/api_learning
+    metrics:
+      - documentation_reads
+      - api_call_attempts
+      - success_rate
+      - time_to_first_success
+    validation:
+      require_working_example: true
+
+  - name: code_navigation
+    type: navigation
+    description: Agent navigates unfamiliar codebase to answer questions
+    agents:
+      - assistant
+    parameters:
+      max_file_reads: 20
+      allow_search: true
+      workspace_dir: output/navigation
+    metrics:
+      - files_examined
+      - search_queries
+      - answer_accuracy
+      - time_to_answer
+    validation:
+      manual_review: true

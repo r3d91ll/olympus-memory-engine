@@ -1,0 +1,121 @@
+[tool.poetry]
+name = "pallas-athena"
+version = "0.1.0"
+description = "Pallas-Athena Memory Engine: Multi-agent MemGPT-style system with PostgreSQL + pgvector"
+authors = ["Todd W. Bucy <r3d91ll@bucy-medrano.me>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.scripts]
+olympus = "src.ui.cli:main"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+# Database
+psycopg = {extras = ["binary", "pool"], version = "^3.1"}
+pgvector = "^0.2.4"
+# Model serving
+ollama = "^0.3.0"
+vllm = "^0.6.0"
+# Core utilities
+numpy = "^1.26.0"
+scipy = "^1.11.0"
+# Benchmarks and datasets
+datasets = "^2.14.0"
+pyyaml = "^6.0.3"
+# CLI and UI
+rich = "^13.7.0"
+prompt-toolkit = "^3.0.0"
+# Monitoring
+prometheus-client = "^0.20.0"
+
+[tool.poetry.group.dev.dependencies]
+# Testing
+pytest = "^7.4.0"
+pytest-cov = "^4.1.0"
+pytest-mock = "^3.12.0"
+# Type checking
+mypy = "^1.8.0"
+types-pyyaml = "^6.0.12"
+# Linting and formatting
+ruff = "^0.1.0"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]  # Allow unused imports in __init__.py
+"tests/**/*.py" = ["B008", "E402", "I001"]  # Allow function calls in argument defaults, imports after sys.path, unsorted imports
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+no_strict_optional = true
+
+[[tool.mypy.overrides]]
+module = [
+    "ollama",
+    "vllm",
+    "vllm.*",
+    "datasets",
+    "datasets.*",
+    "pgvector",
+    "prometheus_client"
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--cov=src",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--verbose",
+]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests requiring external services",
+    "slow: Slow running tests",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "tests/*",
+    "**/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
