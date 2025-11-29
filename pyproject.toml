@@ -1,13 +1,13 @@
 [tool.poetry]
-name = "pallas-athena"
+name = "olympus-memory-engine"
 version = "0.1.0"
-description = "Pallas-Athena Memory Engine: Multi-agent MemGPT-style system with PostgreSQL + pgvector"
+description = "MemGPT-style hierarchical memory for LLM agents with PostgreSQL + pgvector"
 authors = ["Todd W. Bucy <r3d91ll@bucy-medrano.me>"]
 readme = "README.md"
 packages = [{include = "src"}]
 
 [tool.poetry.scripts]
-olympus = "src.ui.cli:main"
+ome = "src.ui.cli:main"
 
 [tool.poetry.dependencies]
 python = "^3.12"
@@ -20,6 +20,9 @@ vllm = "^0.6.0"
 # Core utilities
 numpy = "^1.26.0"
 scipy = "^1.11.0"
+# Configuration & validation
+pydantic = "^2.5.0"
+pydantic-settings = "^2.1.0"
 # Benchmarks and datasets
 datasets = "^2.14.0"
 pyyaml = "^6.0.3"

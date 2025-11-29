@@ -39,8 +39,9 @@ htmlcov/
 .mypy_cache/
 
 # Logs and temp files
-logs/*.log
+logs/
 *.log
+*.jsonl
 output/*
 metrics/*
 

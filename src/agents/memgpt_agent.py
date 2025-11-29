@@ -14,7 +14,6 @@ import ollama
 
 from src.infrastructure.logging_config import (
     get_logger,
-    log_agent_message,
     log_function_call,
     set_context,
 )
@@ -26,25 +25,57 @@ from src.tools.tools import AgentTools
 class OllamaClient:
     """Simple Ollama client for inference and embeddings"""
 
-    def __init__(self, model_id: str = "llama3.1:8b", embedding_model: str = "nomic-embed-text"):
+    def __init__(
+        self,
+        model_id: str = "llama3.1:8b",
+        embedding_model: str = "nomic-embed-text",
+        context_size: int = 32768,  # 32k context window
+    ):
         self.model_id = model_id
         self.embedding_model = embedding_model
-        print(f"[OllamaClient] Using model: {model_id}, embeddings: {embedding_model}")
+        self.context_size = context_size
+        print(f"[OllamaClient] Using model: {model_id}, context: {context_size}, embeddings: {embedding_model}")
 
-    def chat(self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.7):
+    def chat(self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.7, debug: bool = False):
         """Chat completion"""
         try:
             response = ollama.chat(  # type: ignore[call-overload]
                 model=self.model_id,
                 messages=messages,
                 options={
+                    "num_ctx": self.context_size,
                     "num_predict": max_tokens,
                     "temperature": temperature,
                 },
             )
-            # Strip <think> tags if present
-            content = response["message"]["content"]
-            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE)
+            message = response["message"]
+            content = message.get("content", "")
+
+            # Debug: show full response structure for GPT-OSS
+            if debug or ('gpt-oss' in self.model_id.lower() and len(content) < 10):
+                print(f"[DEBUG] Raw response ({len(content)} chars): {repr(content[:500])}")
+                # Check for tool_calls in response
+                if "tool_calls" in message:
+                    print(f"[DEBUG] Tool calls: {message['tool_calls']}")
+                # Show all keys in message
+                print(f"[DEBUG] Message keys: {list(message.keys())}")
+
+            # Handle native tool calls from Ollama (GPT-OSS may use these)
+            if "tool_calls" in message and message["tool_calls"]:
+                tool_calls = message["tool_calls"]
+                # Convert Ollama tool calls to our format
+                results = []
+                for tc in tool_calls:
+                    func_name = tc.get("function", {}).get("name", "")
+                    args = tc.get("function", {}).get("arguments", {})
+                    results.append(f'{{"function": "{func_name}", "arguments": {json.dumps(args)}}}')
+                # Return as JSON for our parser to handle
+                return "```json\n" + "\n".join(results) + "\n```"
+
+            # Strip <think> tags if present (for non-Harmony models)
+            if '<think>' in content.lower():
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE)
+
             return content.strip()
         except Exception as e:
             # If response is too long or other error, return graceful message
@@ -52,6 +83,15 @@ class OllamaClient:
             if "parsing tool call" in error_msg or "unexpected end" in error_msg:
                 return "I apologize, my response was too long. Let me give you a simpler version."
             raise
+
+    def stop(self):
+        """Stop/unload the model from Ollama."""
+        try:
+            import subprocess
+            subprocess.run(["ollama", "stop", self.model_id], capture_output=True)
+            print(f"[OllamaClient] Stopped model: {self.model_id}")
+        except Exception as e:
+            print(f"[OllamaClient] Failed to stop model: {e}")
 
     def embed(self, text: str) -> list[float]:
         """Generate 768-dim embedding"""
@@ -77,15 +117,13 @@ class MemGPTAgent:
         model_id: str = "llama3.1:8b",
         storage: MemoryStorage | None = None,
         enable_tools: bool = True,
-        agent_manager=None,
         workspace: str | None = None,
+        context_size: int = 32768,  # 32k context window
     ):
         self.name = name
         self.storage = storage or MemoryStorage()
         self.tools = AgentTools(workspace_dir=workspace) if enable_tools else None
-        self.agent_manager = agent_manager  # For agent-to-agent communication
-        self._message_depth = 0  # Track recursion depth to prevent infinite loops
-        self._max_message_depth = 1  # Maximum allowed recursion depth
+        self.context_size = context_size
 
         # Initialize logging and metrics
         self.logger = get_logger(f"agents.{name}")
@@ -99,7 +137,7 @@ class MemGPTAgent:
             self.agent_id = existing["id"]
             stored_model = existing["model_id"]
             self.model_id = stored_model
-            self.ollama = OllamaClient(model_id=stored_model)
+            self.ollama = OllamaClient(model_id=stored_model, context_size=context_size)
             # Always refresh system memory to latest default (ensures new features are available)
             self.system_memory = self._default_system_memory()
             self.working_memory = existing["working_memory"] or self._default_working_memory()
@@ -121,7 +159,7 @@ class MemGPTAgent:
         else:
             # Create new agent
             self.model_id = model_id
-            self.ollama = OllamaClient(model_id=model_id)
+            self.ollama = OllamaClient(model_id=model_id, context_size=context_size)
             system_mem = self._default_system_memory()
             working_mem = self._default_working_memory()
             self.agent_id = self.storage.create_agent(
@@ -163,20 +201,19 @@ Format for multiple functions (will be executed in order):
 ```
 
 EXECUTION EXAMPLES (Correct Behavior):
-User: "Tell Bob to create hello.txt"
-You: ```json
-{{"function": "message_agent", "arguments": {{"agent_name": "bob", "message": "Please create hello.txt"}}}}
-```
-
 User: "Save that I prefer Python"
 You: ```json
 {{"function": "save_memory", "arguments": {{"content": "User prefers Python programming language"}}}}
 ```
 
+User: "What do you remember about me?"
+You: ```json
+{{"function": "search_memory", "arguments": {{"query": "user preferences"}}}}
+```
+
 ANTI-PATTERNS (Incorrect - DO NOT DO THIS):
-❌ "I'll send a message to Bob asking him to create the file..."
-❌ "Let me use the message_agent function to contact Bob..."
 ❌ "I should save this to memory using save_memory..."
+❌ "Let me search my memory for that..."
 
 ✅ Just output the JSON. No preamble. No explanation.
 
@@ -191,38 +228,6 @@ Memory Functions:
 
 - update_working_memory: Update your working memory with current context
   Arguments: {{"text": "text to add"}}
-
-Agent Communication:
-- message_agent: Send a message to another INTERNAL agent and get their real response
-  Arguments: {{"agent_name": "name", "message": "your message"}}
-  IMPORTANT: DO NOT make up responses. The function will return the agent's actual response.
-
-UNDERSTANDING PARTICIPANTS:
-
-You interact with two types of participants:
-
-EXTERNAL ACTORS (outside Olympus - NEVER use message_agent):
-→ These are users or external systems interacting WITH Olympus
-→ Examples: todd (human), claude (AI assistant), testers
-→ Respond DIRECTLY to them in your chat response
-→ They CANNOT receive message_agent() calls
-→ You'll see "[SYSTEM] <name> joined" when they enter
-
-INTERNAL AGENTS (inside Olympus - CAN use message_agent):
-→ These are other agents running ON the Olympus server
-→ Examples: alice, bob, coder, qwen, assistant (your peers)
-→ Use message_agent() to collaborate with them
-→ They have their own memory and tools
-
-When to use message_agent():
-✓ User asks you to tell/ask another INTERNAL agent something
-✓ Task would be better handled by specialist INTERNAL agent
-✓ Need to collaborate with another INTERNAL agent
-
-When to respond directly:
-✓ User is asking YOU a question
-✓ User is an EXTERNAL actor (they're outside the agent network)
-✓ Question or task is for you, not for delegation
 
 Your memory is organized in tiers:
 1. System Memory: These instructions (read-only)
@@ -308,22 +313,11 @@ Current Context: Fresh start, no prior context
             "=== SYSTEM MEMORY ===",
             self.system_memory,
             "",
-        ]
-
-        # Add participant list if agent_manager available
-        if self.agent_manager:
-            participant_list = self.agent_manager.get_participant_list()
-            parts.extend([
-                participant_list,
-                "",
-            ])
-
-        parts.extend([
             "=== WORKING MEMORY ===",
             self.working_memory,
             "",
             "=== RECENT CONVERSATION ===",
-        ])
+        ]
 
         for msg in self.fifo_queue:
             parts.append(f"{msg['role'].upper()}: {msg['content']}")
@@ -382,115 +376,173 @@ Current Context: Fresh start, no prior context
         self.metrics.record_memory_operation(self.name, "update")
         return "✓ Updated working memory"
 
-    def _clean_agent_response(self, response: str) -> str:
-        """Clean agent response by removing internal context markers and system prompts.
+    def _uses_harmony_format(self) -> bool:
+        """Check if the model uses Harmony format (GPT-OSS models)."""
+        harmony_models = ['gpt-oss', 'gpt-oss:20b', 'gpt-oss:120b']
+        return any(m in self.model_id.lower() for m in harmony_models)
 
-        This prevents context bleeding where internal memory structures
-        appear in agent-to-agent communication.
+    def _parse_harmony_response(self, response: str) -> tuple[str, list[dict]]:
+        """Parse Harmony format response into content and function calls.
+
+        Harmony format uses channels:
+        - <|channel|>analysis = thinking (stripped)
+        - <|channel|>final = response content
+        - <|channel|>commentary to=functions.{name} = function call
+
+        Returns:
+            (final_content, list of function calls)
         """
-        # Remove context section markers
-        lines = response.split('\n')
-        cleaned_lines = []
-        skip_section = False
+        final_content = ""
+        function_calls = []
 
-        for line in lines:
-            # Detect section markers
-            if line.strip() in ['=== SYSTEM MEMORY ===', '=== WORKING MEMORY ===',
-                               '=== RECENT CONVERSATION ===']:
-                skip_section = True
-                continue
+        # Extract final channel content
+        final_pattern = r'<\|channel\|>final<\|message\|>(.*?)(?:<\|end\|>|<\|start\|>|$)'
+        final_matches = re.findall(final_pattern, response, re.DOTALL)
+        if final_matches:
+            final_content = final_matches[-1].strip()  # Take last final block
 
-            # If we hit a non-marker line after skipping, check if it's content
-            if skip_section:
-                # Check if this looks like actual response content vs internal state
-                if line and not line.startswith(('You are', 'Agent:', 'Status:',
-                                                  'Current Context:', 'CRITICAL INSTRUCTION',
-                                                  'FUNCTION CALLING:', 'USER:', 'ASSISTANT:')):
-                    skip_section = False
-                    cleaned_lines.append(line)
-                elif not line.strip():
-                    # Keep blank lines unless we're still in skip mode
-                    if cleaned_lines and not skip_section:
-                        cleaned_lines.append(line)
-            else:
-                cleaned_lines.append(line)
+        # Extract function calls from commentary channel
+        # Pattern: <|channel|>commentary to=functions.{name} <|constrain|>json<|message|>{args}<|call|>
+        func_pattern = r'<\|channel\|>commentary\s+to=(?:functions\.)?(\w+)\s*<\|constrain\|>json<\|message\|>(.*?)<\|call\|>'
+        func_matches = re.findall(func_pattern, response, re.DOTALL)
 
-        cleaned = '\n'.join(cleaned_lines).strip()
+        for func_name, args_str in func_matches:
+            try:
+                args = json.loads(args_str.strip()) if args_str.strip() else {}
+                function_calls.append({
+                    "function": func_name,
+                    "arguments": args
+                })
+            except json.JSONDecodeError:
+                print(f"[{self.name}] Harmony: Failed to parse function args: {args_str[:50]}...")
 
-        # If cleaning removed everything, return a fallback
-        if not cleaned:
-            # Try to extract just the last substantive line from original response
-            substantive_lines = [l for l in lines if l.strip() and
-                               not l.strip().startswith('===') and
-                               not l.strip().startswith(('You are', 'Agent:', 'Status:'))]
-            if substantive_lines:
-                cleaned = substantive_lines[-1].strip()
-            else:
-                cleaned = "[Agent response was empty or contained only internal state]"
+        # If no Harmony markers found, check for raw function call patterns
+        if not final_content and not function_calls:
+            # Model might have output without proper markers
+            # Check for analysis/thinking blocks and strip them
+            if '<|channel|>analysis' in response:
+                # Strip analysis content
+                response = re.sub(r'<\|channel\|>analysis<\|message\|>.*?(?:<\|end\|>|$)', '', response, flags=re.DOTALL)
 
-        return cleaned
+            # Return cleaned response as content
+            final_content = re.sub(r'<\|[^|]+\|>', '', response).strip()
 
-    def message_agent(self, agent_name: str, message: str) -> str:
-        """Send a message to another agent and get response"""
-        if not self.agent_manager:
-            return "✗ Cannot message agents (no agent manager available)"
+        return final_content, function_calls
 
-        # Check if target is an external actor (defensive programming)
-        if agent_name in self.agent_manager.external_actors:
-            error_msg = (
-                f"ERROR: '{agent_name}' is an external actor, not an internal agent. "
-                f"External actors cannot receive message_agent() calls. "
-                f"Please respond directly to them in your chat response instead."
-            )
-            self.logger.warning(f"Attempted to message external actor: {agent_name}")
-            return error_msg
+    def _execute_harmony_function_calls(self, function_calls: list[dict]) -> str:
+        """Execute function calls from Harmony format and return results."""
+        results = []
+        for call in function_calls:
+            func_name = call.get("function", "")
+            args = call.get("arguments", {})
+            result = self._execute_single_function(func_name, args)
+            results.append(f"[{func_name}]: {result}")
+        return "\n".join(results)
 
-        # Check recursion depth to prevent infinite loops
-        if self._message_depth >= self._max_message_depth:
-            self.logger.warning(f"Recursion limit reached when messaging {agent_name}")
-            return f"[@{agent_name}]: [Message suppressed - recursion limit reached]"
+    def _execute_function_calls_with_followup(self, response: str, messages: list[dict], max_rounds: int = 5) -> tuple[str, bool]:
+        """Execute function calls and send results back to model for processing.
 
-        try:
-            # Increment depth before calling
-            self._message_depth += 1
+        This handles the tool call loop:
+        1. Model requests tool call
+        2. We execute the tool
+        3. We send results back to model
+        4. Model generates final response (or more tool calls)
+        5. Repeat until no more tool calls or max_rounds reached
 
-            # Log outgoing message
-            log_agent_message(
-                sender=self.name,
-                recipient=agent_name,
-                message=message
-            )
-            # Record message metric
-            self.metrics.record_message(sender=self.name, recipient=agent_name)
+        Returns:
+            (final_response, had_tool_calls)
+        """
+        current_response = response
+        had_any_tool_calls = False
 
-            # Add context that this is from another agent
-            contextual_message = f"[Message from agent {self.name}]: {message}\n\nIMPORTANT: Respond with a short, direct answer. Do NOT call message_agent in your response."
+        for round_num in range(max_rounds):
+            # Check for JSON function calls
+            json_pattern = r'```json\s*(\{[^`]+\}|\[[^`]+\])\s*```'
+            matches = re.findall(json_pattern, current_response, re.DOTALL)
 
-            # Route message through agent manager
-            response, stats = self.agent_manager.route_message(agent_name, contextual_message)
+            if not matches:
+                # Try bare JSON
+                json_pattern_bare = r'(\{\s*"function"\s*:(?:[^{}]|\{[^{}]*\})*\})'
+                matches = re.findall(json_pattern_bare, current_response, re.DOTALL)
 
-            # Clean the response to remove context bleeding
-            cleaned_response = self._clean_agent_response(response)
+            if not matches:
+                # No function calls in this response
+                if round_num == 0:
+                    # First round, no tool calls at all
+                    return self._execute_function_calls(current_response), False
+                else:
+                    # Later round, we've processed some tools and now have final response
+                    return current_response, had_any_tool_calls
 
-            # Decrement depth after calling
-            self._message_depth -= 1
+            had_any_tool_calls = True
 
-            self.logger.info(f"Received response from {agent_name}", extra={
-                'extra_data': {'response_preview': cleaned_response[:100]}
+            # Execute function calls and collect results
+            all_results = []
+            for json_str in matches:
+                try:
+                    func_data = json.loads(json_str)
+                    if isinstance(func_data, dict):
+                        func_data = [func_data]
+
+                    for func_call in func_data:
+                        if not isinstance(func_call, dict) or "function" not in func_call:
+                            continue
+
+                        func_name = func_call["function"]
+                        args = func_call.get("arguments", {})
+                        result = self._execute_single_function(func_name, args)
+                        all_results.append({
+                            "function": func_name,
+                            "result": result
+                        })
+                except json.JSONDecodeError:
+                    continue
+
+            if not all_results:
+                return current_response, had_any_tool_calls
+
+            # Build tool response message
+            tool_results_text = "\n\n".join([
+                f"Result of {r['function']}:\n{r['result'][:8000]}"  # Limit size
+                for r in all_results
+            ])
+
+            # Add assistant's tool call and tool response to messages
+            messages.append({"role": "assistant", "content": current_response})
+            messages.append({
+                "role": "user",
+                "content": f"Here are the results from the tools you called:\n\n{tool_results_text}\n\nPlease process these results. If you need to save information to memory, call save_memory. Otherwise, provide a summary."
             })
 
-            return f"[@{agent_name}]: {cleaned_response}"
-        except ValueError as e:
-            self._message_depth -= 1
-            self.logger.error(f"Failed to message {agent_name}: {e}")
-            return f"✗ {e}"
-        except Exception as e:
-            self._message_depth -= 1
-            self.logger.error(f"Error messaging {agent_name}: {e}", exc_info=True)
-            return f"✗ Error messaging {agent_name}: {e}"
+            # Call model again to process results
+            print(f"[{self.name}] Tool call round {round_num + 1}: sending results back to model...")
+            current_response = self.ollama.chat(messages, max_tokens=1024, debug=True)
+
+            # Empty response means the model only produced tool_calls (handled by Ollama wrapper)
+            if current_response.strip() == "":
+                print(f"[{self.name}] Model returned empty response (likely tool_calls), continuing...")
+                continue
+
+        # Reached max rounds
+        print(f"[{self.name}] Warning: Reached max tool call rounds ({max_rounds})")
+        return current_response, had_any_tool_calls
 
     def _execute_function_calls(self, response: str) -> str:
         """Execute function calls found in the response (JSON format)"""
+
+        # Check if using Harmony format
+        if self._uses_harmony_format() and ('<|' in response or not response.strip()):
+            final_content, function_calls = self._parse_harmony_response(response)
+
+            if function_calls:
+                results = self._execute_harmony_function_calls(function_calls)
+                # Combine final content with function results
+                if final_content:
+                    return f"{final_content}\n\n{results}"
+                return results
+
+            # Return final content or original if parsing found nothing
+            return final_content if final_content else response
 
         # Look for JSON code blocks (with or without "json" label)
         # Use greedy matching to capture full JSON including nested braces
@@ -520,7 +572,7 @@ Current Context: Fresh start, no prior context
                     continue
 
                 # Execute functions and collect results
-                results = []
+                call_results: list[str] = []
                 for func_call in func_data:
                     if not isinstance(func_call, dict) or "function" not in func_call:
                         print(f"[{self.name}] Warning: Invalid function call structure")
@@ -531,10 +583,10 @@ Current Context: Fresh start, no prior context
 
                     # Execute the function
                     result = self._execute_single_function(func_name, args)
-                    results.append(result)
+                    call_results.append(result)
 
                 # Replace JSON block with results
-                results_text = "\n".join(results)
+                results_text = "\n".join(call_results)
                 # Find the full JSON block including ``` markers if present (with or without "json")
                 full_block_pattern = r'```(?:json)?\s*' + re.escape(json_str) + r'\s*```'
                 if re.search(full_block_pattern, response, re.DOTALL):
@@ -561,6 +613,10 @@ Current Context: Fresh start, no prior context
         success = False
         result = ""
 
+        # Handle nested arguments from GPT-OSS (it sometimes wraps args in another 'arguments' key)
+        if "arguments" in args and isinstance(args["arguments"], dict):
+            args = args["arguments"]
+
         try:
             # Memory functions
             if func_name == "save_memory":
@@ -577,17 +633,6 @@ Current Context: Fresh start, no prior context
                 text = args.get("text", "")
                 result = self.update_working_memory(text)
                 success = True
-
-            # Agent-to-agent communication
-            elif func_name == "message_agent":
-                agent_name = args.get("agent_name", "")
-                message = args.get("message", "")
-                if not agent_name or not message:
-                    result = "✗ message_agent requires 'agent_name' and 'message' arguments"
-                else:
-                    print(f"[{self.name}] → {agent_name}: {message[:60]}...")
-                    result = self.message_agent(agent_name, message)
-                    success = True
 
             # File and CLI tools
             elif self.tools:
@@ -696,12 +741,6 @@ Current Context: Fresh start, no prior context
         """
         message_lower = user_message.lower()
 
-        # Agent communication patterns
-        if any(word in message_lower for word in ['tell', 'ask', 'message', 'send to']):
-            # Check if an agent name is mentioned
-            if any(word in message_lower for word in ['bob', 'alice', 'agent']):
-                return True, "HINT: Use the message_agent function to communicate with the other agent."
-
         # Memory operations
         if any(word in message_lower for word in ['save', 'remember', 'store']):
             return True, "HINT: Use save_memory to store this information."
@@ -783,7 +822,7 @@ Current Context: Fresh start, no prior context
             'extra_data': {
                 'model': self.model_id,
                 'latency_seconds': llm_duration,
-                'response_preview': response[:100]
+                'response_preview': response[:100] if response else "(tool call)"
             }
         })
         # Record LLM metrics (Ollama doesn't provide token counts, so we estimate)
@@ -792,11 +831,11 @@ Current Context: Fresh start, no prior context
             model=self.model_id,
             latency=llm_duration,
             input_tokens=len(context.split()) // 4,  # Rough estimate
-            output_tokens=len(response.split()) // 4  # Rough estimate
+            output_tokens=len(response.split()) // 4 if response else 0
         )
 
-        # Execute any function calls (simple parsing)
-        response = self._execute_function_calls(response)
+        # Execute any function calls and handle tool response loop
+        response, _ = self._execute_function_calls_with_followup(response, messages)
 
         # Add response to FIFO
         self.fifo_queue.append({"role": "assistant", "content": response})

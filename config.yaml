@@ -26,7 +26,7 @@ models:
 embedding_model: nomic-embed-text
 
 # Default model if none specified
-default_model: llama3.1:8b
+default_model: gpt-oss:20b
 
 # Default agent name
 default_agent: assistant
@@ -41,27 +41,27 @@ memory:
 # Pre-configured agents (will be created on startup if they don't exist)
 agents:
   - name: assistant
-    model: llama3.1:8b
+    model: gpt-oss:20b
     description: General purpose assistant agent
     enable_tools: true
 
   - name: coder
-    model: qwen2.5-coder:latest
+    model: gpt-oss:20b
     description: Specialized coding agent
     enable_tools: true
 
-  - name: qwen
-    model: qwen3:8b
-    description: Qwen agent for reasoning tasks
+  - name: researcher
+    model: gpt-oss:20b
+    description: Research and reasoning agent
     enable_tools: true
 
   - name: alice
-    model: llama3.1:8b
+    model: gpt-oss:20b
     description: Collaborative agent for experiments
     enable_tools: true
 
   - name: bob
-    model: llama3.1:8b
+    model: gpt-oss:20b
     description: Collaborative agent for experiments
     enable_tools: true
 

@@ -179,7 +179,7 @@ def compute_phase_space_density(
         density=True,  # Normalize to probability density
     )
 
-    return density
+    return np.asarray(density)
 
 
 def analyze_trajectory(trajectory: list[tuple[float, float]]) -> dict:

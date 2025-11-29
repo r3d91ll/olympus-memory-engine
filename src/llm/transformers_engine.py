@@ -261,22 +261,23 @@ class TransformersModelEngine:
         generation_time = time.time() - start_time
 
         # Decode generated text
-        generated_ids = outputs.sequences[0][inputs.input_ids.shape[1]:]
+        # Note: We configure return_dict_in_generate=True so outputs has these attrs
+        generated_ids = outputs.sequences[0][inputs.input_ids.shape[1]:]  # type: ignore[union-attr]
         text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
         # Extract token logprobs AND prediction entropy (the CORRECT entropy)
         (token_logprobs, token_entropy_trajectory,
          mean_token_entropy, early_token_entropy, late_token_entropy) = \
-            self._extract_token_logprobs_and_entropy(outputs.scores)
+            self._extract_token_logprobs_and_entropy(outputs.scores)  # type: ignore[union-attr]
 
         # Extract and analyze hidden states
-        hidden_states = self._extract_hidden_states(outputs.hidden_states)
+        hidden_states = self._extract_hidden_states(outputs.hidden_states)  # type: ignore[union-attr]
         d_eff_by_layer = self._compute_d_eff_by_layer(hidden_states)
         beta_by_layer = self._compute_beta_by_layer(hidden_states)
         layer_norms = self._compute_layer_norms(hidden_states)
 
         # Extract and analyze attention patterns
-        attentions = self._extract_attentions(outputs.attentions)
+        attentions = self._extract_attentions(outputs.attentions)  # type: ignore[union-attr]
         attention_entropy_by_layer = self._compute_attention_entropy(attentions)
 
         return DiagnosticResult(
@@ -315,14 +316,14 @@ class TransformersModelEngine:
         num_steps = len(hidden_states_tuple)
 
         # Organize by layer
-        layer_states = [[] for _ in range(num_layers)]
+        layer_states: list[list[np.ndarray]] = [[] for _ in range(num_layers)]
 
         for step_states in hidden_states_tuple:
             for layer_idx, layer_state in enumerate(step_states):
                 # layer_state shape: (batch=1, seq_len, hidden_dim)
                 # Take last token of sequence (newly generated token)
                 # Convert to float32 before numpy (bfloat16 not supported by numpy)
-                token_state = layer_state[0, -1, :].cpu().float().numpy()
+                token_state: np.ndarray = layer_state[0, -1, :].cpu().float().numpy()
                 layer_states[layer_idx].append(token_state)
 
         # Convert to arrays
@@ -345,17 +346,17 @@ class TransformersModelEngine:
             return []
 
         num_layers = len(attentions_tuple[0])
-        layer_attentions = [[] for _ in range(num_layers)]
+        layer_attentions: list[list[np.ndarray]] = [[] for _ in range(num_layers)]
 
         for step_attns in attentions_tuple:
             for layer_idx, layer_attn in enumerate(step_attns):
                 # layer_attn shape: (batch=1, num_heads, seq_len, seq_len)
                 # Convert to float32 before numpy (bfloat16 not supported by numpy)
-                attn = layer_attn[0].cpu().float().numpy()
+                attn: np.ndarray = layer_attn[0].cpu().float().numpy()
                 layer_attentions[layer_idx].append(attn)
 
-        # Return as list (not stacked array) since shapes vary per generation step
-        return layer_attentions
+        # Stack each layer's attentions into a single array
+        return [np.array(attns) for attns in layer_attentions]
 
     def _extract_token_logprobs_and_entropy(self, scores: Tuple) -> Tuple[List[float], List[float], float, float, float]:
         """Extract log probabilities AND prediction entropy for generated tokens.
@@ -605,11 +606,12 @@ class TransformersModelEngine:
         # Try to use tokenizer's chat template if available
         if hasattr(self.tokenizer, "apply_chat_template"):
             try:
-                return self.tokenizer.apply_chat_template(
+                result = self.tokenizer.apply_chat_template(
                     messages,
                     tokenize=False,
                     add_generation_prompt=True
                 )
+                return str(result)
             except Exception:
                 pass
 
