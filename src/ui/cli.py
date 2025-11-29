@@ -12,63 +12,42 @@ import argparse
 import sys
 from pathlib import Path
 
-import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 
 from src.agents.agent_manager import AgentManager, ExternalActorInfo
+from src.config import OMEConfig, load_config
 from src.memory.memory_storage import MemoryStorage
 from src.ui.shell import InteractiveShell
 from src.ui.terminal_ui import TerminalUI
 
 
-def load_config(config_path: Path = Path("config.yaml")) -> dict:
-    """Load configuration from YAML file.
-
-    Args:
-        config_path: Path to config file
-
-    Returns:
-        Configuration dictionary
-    """
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def prompt_for_identity(config: dict, console: Console) -> tuple[str, str, str]:
+def prompt_for_identity(config: OMEConfig, console: Console) -> tuple[str, str, str]:
     """Prompt user to select their identity.
 
     Args:
-        config: Configuration dictionary
+        config: Typed OME configuration
         console: Rich console for output
 
     Returns:
         Tuple of (actor_id, actor_type, description)
     """
-    external_actors_config = config.get("external_actors", [])
-
-    # Build list of predefined actors
-    predefined_actors = []
-    if isinstance(external_actors_config, list):
-        for actor in external_actors_config:
-            if isinstance(actor, dict) and "actor_id" in actor:
-                predefined_actors.append(actor)
+    predefined_actors = config.external_actors
 
     if not predefined_actors:
         # No predefined actors, prompt for name
         console.print("\n[yellow]No predefined external actors found in config.[/yellow]")
         actor_id = Prompt.ask("Enter your name/identifier")
-        actor_type = "human"  # Default to human
+        actor_type = "human"
         description = f"user ({actor_id})"
         return actor_id, actor_type, description
 
     # Show predefined options
     console.print("\n[bold cyan]Who are you?[/bold cyan]\n")
     for idx, actor in enumerate(predefined_actors, 1):
-        console.print(
-            f"  {idx}. [green]{actor['actor_id']}[/green] - {actor.get('description', 'N/A')}"
-        )
+        desc = actor.description or "N/A"
+        console.print(f"  {idx}. [green]{actor.actor_id}[/green] - {desc}")
     console.print(f"  {len(predefined_actors) + 1}. [yellow]Other (enter name)[/yellow]\n")
 
     # Get choice
@@ -81,9 +60,9 @@ def prompt_for_identity(config: dict, console: Console) -> tuple[str, str, str]:
                 # Selected predefined actor
                 selected = predefined_actors[choice_num - 1]
                 return (
-                    selected["actor_id"],
-                    selected.get("type", "human"),
-                    selected.get("description", f"user ({selected['actor_id']})"),
+                    selected.actor_id,
+                    selected.actor_type,
+                    selected.description or f"user ({selected.actor_id})",
                 )
             elif choice_num == len(predefined_actors) + 1:
                 # Enter custom name
@@ -136,10 +115,14 @@ def main() -> None:
     # Load configuration
     try:
         config = load_config()
-        print(f"[Config] Loaded from config.yaml")
+        print("[Config] Loaded from config.yaml")
     except FileNotFoundError:
         print("[Error] config.yaml not found in current directory")
         print("[Info] Please run from project root or create config.yaml")
+        sys.exit(1)
+    except ValueError as e:
+        # Pydantic validation error
+        print(f"[Error] Invalid config: {e}")
         sys.exit(1)
     except Exception as e:
         print(f"[Error] Failed to load config: {e}")
@@ -168,13 +151,11 @@ def main() -> None:
         description = f"user ({actor_id})"
 
         # Check if this identity is in config
-        external_actors_config = config.get("external_actors", [])
-        if isinstance(external_actors_config, list):
-            for actor in external_actors_config:
-                if isinstance(actor, dict) and actor.get("actor_id") == actor_id:
-                    actor_type = actor.get("type", "human")
-                    description = actor.get("description", description)
-                    break
+        for actor in config.external_actors:
+            if actor.actor_id == actor_id:
+                actor_type = actor.actor_type
+                description = actor.description or description
+                break
 
         print(f"[Identity] Using --identity flag: {actor_id}")
     else:
@@ -184,48 +165,25 @@ def main() -> None:
     print()
 
     # Load or create agents from config
-    agents_config = config.get("agents", [])
-    if not agents_config:
+    if not config.agents:
         print("[Warning] No agents configured in config.yaml")
         print("[Info] Add agents to config.yaml under 'agents:' section")
     else:
-        print(f"[Agents] Loading {len(agents_config)} configured agents...")
-        for idx, agent_config in enumerate(agents_config):
-            # Validate agent_config structure
-            if not isinstance(agent_config, dict):
-                print(
-                    f"  ✗ Agent config at index {idx} is not a dict: {type(agent_config).__name__}"
-                )
-                continue
-
-            name = agent_config.get("name")
-            model = agent_config.get("model")
-
-            # Validate required fields
-            if not name or not isinstance(name, str) or not name.strip():
-                print(
-                    f"  ✗ Agent config at index {idx} missing or invalid 'name' field"
-                )
-                continue
-            if not model or not isinstance(model, str) or not model.strip():
-                print(
-                    f"  ✗ Agent '{name}' at index {idx} missing or invalid 'model' field"
-                )
-                continue
-
+        print(f"[Agents] Loading {len(config.agents)} configured agents...")
+        for agent_cfg in config.agents:
             try:
                 # Try to create new agent or register existing
                 info = agent_manager.create_agent(
-                    name=name,
-                    model_id=model,
+                    name=agent_cfg.name,
+                    model_id=agent_cfg.model,
                     storage=storage,
                 )
-                print(f"  ✓ {name} ({model}) - {info.agent_id}")
+                print(f"  ✓ {agent_cfg.name} ({agent_cfg.model}) - {info.agent_id}")
             except ValueError:
                 # Agent already exists in database
-                print(f"  ✓ {name} (already exists)")
+                print(f"  ✓ {agent_cfg.name} (already exists)")
             except Exception as e:
-                print(f"  ✗ {name} - Error: {e}")
+                print(f"  ✗ {agent_cfg.name} - Error: {e}")
 
     print()
     print("=" * 70)
@@ -273,6 +231,18 @@ def main() -> None:
 
         # Cleanup
         print("\n[Shutdown] Closing connections...")
+
+        # Stop Ollama models to free GPU memory
+        print("[Shutdown] Stopping Ollama models...")
+        stopped_models = set()
+        for agent_name, agent in agent_manager._agents.items():
+            if hasattr(agent, 'ollama') and agent.ollama is not None:
+                model_id = agent.ollama.model_id
+                if model_id not in stopped_models:
+                    agent.ollama.stop()
+                    stopped_models.add(model_id)
+                    print(f"[Shutdown] Stopped model: {model_id}")
+
         agent_manager.shutdown()
         storage.close()
         print("[Shutdown] Complete")

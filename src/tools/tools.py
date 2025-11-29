@@ -4,6 +4,7 @@ CLI Tools for MemGPT agents
 Tools that agents can invoke to manipulate files, run commands, etc.
 """
 
+import html
 import os
 import re
 import shlex
@@ -12,6 +13,35 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+
+def extract_text_from_html(html_content: str) -> str:
+    """Extract readable text from HTML content.
+
+    Removes scripts, styles, and HTML tags, then cleans up whitespace.
+    """
+    # Remove script and style elements
+    text = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # Remove HTML comments
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+
+    # Replace common block elements with newlines
+    text = re.sub(r'<(br|p|div|h[1-6]|li|tr)[^>]*>', '\n', text, flags=re.IGNORECASE)
+
+    # Remove all remaining HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+
+    # Decode HTML entities
+    text = html.unescape(text)
+
+    # Clean up whitespace
+    text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs to single space
+    text = re.sub(r'\n\s*\n', '\n\n', text)  # Multiple newlines to double newline
+    text = text.strip()
+
+    return text
 
 
 class AgentTools:
@@ -422,6 +452,11 @@ class AgentTools:
                 # Decode
                 encoding = response.headers.get_content_charset('utf-8')
                 text = content.decode(encoding, errors='ignore')
+
+                # Extract text from HTML if content looks like HTML
+                content_type = response.headers.get('Content-Type', '')
+                if 'text/html' in content_type or text.strip().startswith('<!DOCTYPE') or '<html' in text[:500].lower():
+                    text = extract_text_from_html(text)
 
                 # Truncate if needed
                 if len(text) > 10000:

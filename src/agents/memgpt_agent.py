@@ -31,7 +31,7 @@ class OllamaClient:
         self.embedding_model = embedding_model
         print(f"[OllamaClient] Using model: {model_id}, embeddings: {embedding_model}")
 
-    def chat(self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.7):
+    def chat(self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.7, debug: bool = False):
         """Chat completion"""
         try:
             response = ollama.chat(  # type: ignore[call-overload]
@@ -42,9 +42,34 @@ class OllamaClient:
                     "temperature": temperature,
                 },
             )
-            # Strip <think> tags if present
-            content = response["message"]["content"]
-            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE)
+            message = response["message"]
+            content = message.get("content", "")
+
+            # Debug: show full response structure for GPT-OSS
+            if debug or ('gpt-oss' in self.model_id.lower() and len(content) < 10):
+                print(f"[DEBUG] Raw response ({len(content)} chars): {repr(content[:500])}")
+                # Check for tool_calls in response
+                if "tool_calls" in message:
+                    print(f"[DEBUG] Tool calls: {message['tool_calls']}")
+                # Show all keys in message
+                print(f"[DEBUG] Message keys: {list(message.keys())}")
+
+            # Handle native tool calls from Ollama (GPT-OSS may use these)
+            if "tool_calls" in message and message["tool_calls"]:
+                tool_calls = message["tool_calls"]
+                # Convert Ollama tool calls to our format
+                results = []
+                for tc in tool_calls:
+                    func_name = tc.get("function", {}).get("name", "")
+                    args = tc.get("function", {}).get("arguments", {})
+                    results.append(f'{{"function": "{func_name}", "arguments": {json.dumps(args)}}}')
+                # Return as JSON for our parser to handle
+                return "```json\n" + "\n".join(results) + "\n```"
+
+            # Strip <think> tags if present (for non-Harmony models)
+            if '<think>' in content.lower():
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE)
+
             return content.strip()
         except Exception as e:
             # If response is too long or other error, return graceful message
@@ -52,6 +77,15 @@ class OllamaClient:
             if "parsing tool call" in error_msg or "unexpected end" in error_msg:
                 return "I apologize, my response was too long. Let me give you a simpler version."
             raise
+
+    def stop(self):
+        """Stop/unload the model from Ollama."""
+        try:
+            import subprocess
+            subprocess.run(["ollama", "stop", self.model_id], capture_output=True)
+            print(f"[OllamaClient] Stopped model: {self.model_id}")
+        except Exception as e:
+            print(f"[OllamaClient] Failed to stop model: {e}")
 
     def embed(self, text: str) -> list[float]:
         """Generate 768-dim embedding"""
@@ -489,8 +523,173 @@ Current Context: Fresh start, no prior context
             self.logger.error(f"Error messaging {agent_name}: {e}", exc_info=True)
             return f"✗ Error messaging {agent_name}: {e}"
 
+    def _uses_harmony_format(self) -> bool:
+        """Check if the model uses Harmony format (GPT-OSS models)."""
+        harmony_models = ['gpt-oss', 'gpt-oss:20b', 'gpt-oss:120b']
+        return any(m in self.model_id.lower() for m in harmony_models)
+
+    def _parse_harmony_response(self, response: str) -> tuple[str, list[dict]]:
+        """Parse Harmony format response into content and function calls.
+
+        Harmony format uses channels:
+        - <|channel|>analysis = thinking (stripped)
+        - <|channel|>final = response content
+        - <|channel|>commentary to=functions.{name} = function call
+
+        Returns:
+            (final_content, list of function calls)
+        """
+        final_content = ""
+        function_calls = []
+
+        # Extract final channel content
+        final_pattern = r'<\|channel\|>final<\|message\|>(.*?)(?:<\|end\|>|<\|start\|>|$)'
+        final_matches = re.findall(final_pattern, response, re.DOTALL)
+        if final_matches:
+            final_content = final_matches[-1].strip()  # Take last final block
+
+        # Extract function calls from commentary channel
+        # Pattern: <|channel|>commentary to=functions.{name} <|constrain|>json<|message|>{args}<|call|>
+        func_pattern = r'<\|channel\|>commentary\s+to=(?:functions\.)?(\w+)\s*<\|constrain\|>json<\|message\|>(.*?)<\|call\|>'
+        func_matches = re.findall(func_pattern, response, re.DOTALL)
+
+        for func_name, args_str in func_matches:
+            try:
+                args = json.loads(args_str.strip()) if args_str.strip() else {}
+                function_calls.append({
+                    "function": func_name,
+                    "arguments": args
+                })
+            except json.JSONDecodeError:
+                print(f"[{self.name}] Harmony: Failed to parse function args: {args_str[:50]}...")
+
+        # If no Harmony markers found, check for raw function call patterns
+        if not final_content and not function_calls:
+            # Model might have output without proper markers
+            # Check for analysis/thinking blocks and strip them
+            if '<|channel|>analysis' in response:
+                # Strip analysis content
+                response = re.sub(r'<\|channel\|>analysis<\|message\|>.*?(?:<\|end\|>|$)', '', response, flags=re.DOTALL)
+
+            # Return cleaned response as content
+            final_content = re.sub(r'<\|[^|]+\|>', '', response).strip()
+
+        return final_content, function_calls
+
+    def _execute_harmony_function_calls(self, function_calls: list[dict]) -> str:
+        """Execute function calls from Harmony format and return results."""
+        results = []
+        for call in function_calls:
+            func_name = call.get("function", "")
+            args = call.get("arguments", {})
+            result = self._execute_single_function(func_name, args)
+            results.append(f"[{func_name}]: {result}")
+        return "\n".join(results)
+
+    def _execute_function_calls_with_followup(self, response: str, messages: list[dict], max_rounds: int = 5) -> tuple[str, bool]:
+        """Execute function calls and send results back to model for processing.
+
+        This handles the tool call loop:
+        1. Model requests tool call
+        2. We execute the tool
+        3. We send results back to model
+        4. Model generates final response (or more tool calls)
+        5. Repeat until no more tool calls or max_rounds reached
+
+        Returns:
+            (final_response, had_tool_calls)
+        """
+        current_response = response
+        had_any_tool_calls = False
+
+        for round_num in range(max_rounds):
+            # Check for JSON function calls
+            json_pattern = r'```json\s*(\{[^`]+\}|\[[^`]+\])\s*```'
+            matches = re.findall(json_pattern, current_response, re.DOTALL)
+
+            if not matches:
+                # Try bare JSON
+                json_pattern_bare = r'(\{\s*"function"\s*:(?:[^{}]|\{[^{}]*\})*\})'
+                matches = re.findall(json_pattern_bare, current_response, re.DOTALL)
+
+            if not matches:
+                # No function calls in this response
+                if round_num == 0:
+                    # First round, no tool calls at all
+                    return self._execute_function_calls(current_response), False
+                else:
+                    # Later round, we've processed some tools and now have final response
+                    return current_response, had_any_tool_calls
+
+            had_any_tool_calls = True
+
+            # Execute function calls and collect results
+            all_results = []
+            for json_str in matches:
+                try:
+                    func_data = json.loads(json_str)
+                    if isinstance(func_data, dict):
+                        func_data = [func_data]
+
+                    for func_call in func_data:
+                        if not isinstance(func_call, dict) or "function" not in func_call:
+                            continue
+
+                        func_name = func_call["function"]
+                        args = func_call.get("arguments", {})
+                        result = self._execute_single_function(func_name, args)
+                        all_results.append({
+                            "function": func_name,
+                            "result": result
+                        })
+                except json.JSONDecodeError:
+                    continue
+
+            if not all_results:
+                return current_response, had_any_tool_calls
+
+            # Build tool response message
+            tool_results_text = "\n\n".join([
+                f"Result of {r['function']}:\n{r['result'][:8000]}"  # Limit size
+                for r in all_results
+            ])
+
+            # Add assistant's tool call and tool response to messages
+            messages.append({"role": "assistant", "content": current_response})
+            messages.append({
+                "role": "user",
+                "content": f"Here are the results from the tools you called:\n\n{tool_results_text}\n\nPlease process these results. If you need to save information to memory, call save_memory. Otherwise, provide a summary."
+            })
+
+            # Call model again to process results
+            print(f"[{self.name}] Tool call round {round_num + 1}: sending results back to model...")
+            current_response = self.ollama.chat(messages, max_tokens=1024, debug=True)
+
+            # Empty response means the model only produced tool_calls (handled by Ollama wrapper)
+            if current_response.strip() == "":
+                print(f"[{self.name}] Model returned empty response (likely tool_calls), continuing...")
+                continue
+
+        # Reached max rounds
+        print(f"[{self.name}] Warning: Reached max tool call rounds ({max_rounds})")
+        return current_response, had_any_tool_calls
+
     def _execute_function_calls(self, response: str) -> str:
         """Execute function calls found in the response (JSON format)"""
+
+        # Check if using Harmony format
+        if self._uses_harmony_format() and ('<|' in response or not response.strip()):
+            final_content, function_calls = self._parse_harmony_response(response)
+
+            if function_calls:
+                results = self._execute_harmony_function_calls(function_calls)
+                # Combine final content with function results
+                if final_content:
+                    return f"{final_content}\n\n{results}"
+                return results
+
+            # Return final content or original if parsing found nothing
+            return final_content if final_content else response
 
         # Look for JSON code blocks (with or without "json" label)
         # Use greedy matching to capture full JSON including nested braces
@@ -520,7 +719,7 @@ Current Context: Fresh start, no prior context
                     continue
 
                 # Execute functions and collect results
-                results = []
+                call_results: list[str] = []
                 for func_call in func_data:
                     if not isinstance(func_call, dict) or "function" not in func_call:
                         print(f"[{self.name}] Warning: Invalid function call structure")
@@ -531,10 +730,10 @@ Current Context: Fresh start, no prior context
 
                     # Execute the function
                     result = self._execute_single_function(func_name, args)
-                    results.append(result)
+                    call_results.append(result)
 
                 # Replace JSON block with results
-                results_text = "\n".join(results)
+                results_text = "\n".join(call_results)
                 # Find the full JSON block including ``` markers if present (with or without "json")
                 full_block_pattern = r'```(?:json)?\s*' + re.escape(json_str) + r'\s*```'
                 if re.search(full_block_pattern, response, re.DOTALL):
@@ -560,6 +759,10 @@ Current Context: Fresh start, no prior context
         start_time = time.time()
         success = False
         result = ""
+
+        # Handle nested arguments from GPT-OSS (it sometimes wraps args in another 'arguments' key)
+        if "arguments" in args and isinstance(args["arguments"], dict):
+            args = args["arguments"]
 
         try:
             # Memory functions
@@ -783,7 +986,7 @@ Current Context: Fresh start, no prior context
             'extra_data': {
                 'model': self.model_id,
                 'latency_seconds': llm_duration,
-                'response_preview': response[:100]
+                'response_preview': response[:100] if response else "(tool call)"
             }
         })
         # Record LLM metrics (Ollama doesn't provide token counts, so we estimate)
@@ -792,11 +995,11 @@ Current Context: Fresh start, no prior context
             model=self.model_id,
             latency=llm_duration,
             input_tokens=len(context.split()) // 4,  # Rough estimate
-            output_tokens=len(response.split()) // 4  # Rough estimate
+            output_tokens=len(response.split()) // 4 if response else 0
         )
 
-        # Execute any function calls (simple parsing)
-        response = self._execute_function_calls(response)
+        # Execute any function calls and handle tool response loop
+        response, had_tool_calls = self._execute_function_calls_with_followup(response, messages)
 
         # Add response to FIFO
         self.fifo_queue.append({"role": "assistant", "content": response})

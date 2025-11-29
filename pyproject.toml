@@ -20,6 +20,9 @@ vllm = "^0.6.0"
 # Core utilities
 numpy = "^1.26.0"
 scipy = "^1.11.0"
+# Configuration & validation
+pydantic = "^2.5.0"
+pydantic-settings = "^2.1.0"
 # Benchmarks and datasets
 datasets = "^2.14.0"
 pyyaml = "^6.0.3"

@@ -12,16 +12,9 @@ import psycopg
 from psycopg import sql
 
 # Database connection settings from environment variables
-PG_HOST = os.environ.get("PG_HOST", "/var/run/postgresql")
+PG_HOST = os.environ.get("PG_HOST", "/var/run/postgresql")  # Unix socket
 PG_DB = os.environ.get("PG_DB", "olympus_memory")
-PG_USER = os.environ.get("PG_USER")
-
-# Validate required environment variables
-if not PG_USER:
-    print("✗ Error: PG_USER environment variable is required")
-    print("\nPlease set the PostgreSQL user:")
-    print("  export PG_USER=your_username")
-    sys.exit(1)
+PG_USER = os.environ.get("PG_USER", "todd")  # Should match OS user for peer auth
 
 
 def main():
@@ -31,7 +24,8 @@ def main():
     print("=" * 70)
 
     # Connect to postgres to create database
-    print(f"\n1. Connecting to PostgreSQL...")
+    print(f"\n1. Connecting to PostgreSQL via Unix socket...")
+    print(f"   Socket: {PG_HOST}, User: {PG_USER}")
     try:
         conn = psycopg.connect(
             host=PG_HOST,
@@ -41,8 +35,10 @@ def main():
         )
     except psycopg.Error as e:
         print(f"✗ Failed to connect to PostgreSQL: {e}")
-        print("\nMake sure PostgreSQL is running:")
+        print("\nMake sure PostgreSQL is running and user exists:")
         print("  sudo systemctl status postgresql")
+        print("\nTo create PostgreSQL user matching your OS user:")
+        print("  sudo -u postgres createuser --createdb todd")
         sys.exit(1)
 
     print(f"✓ Connected to PostgreSQL")
@@ -77,9 +73,9 @@ def main():
     except psycopg.Error as e:
         print(f"✗ Failed to connect to database '{PG_DB}': {e}")
         print("\nConnection details:")
-        print(f"  host={PG_HOST}")
-        print(f"  dbname={PG_DB}")
-        print(f"  user={PG_USER}")
+        print(f"  Socket: {PG_HOST}")
+        print(f"  Database: {PG_DB}")
+        print(f"  User: {PG_USER}")
         sys.exit(1)
 
     # Enable pgvector extension

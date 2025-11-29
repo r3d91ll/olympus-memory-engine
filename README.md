@@ -1,5 +1,7 @@
 # Olympus Memory Engine
 
+> **Status: Work In Progress**
+
 **High-performance MemGPT-style hierarchical memory system for local LLM agents.**
 
 A local-only, in-RAM implementation designed for maximum performance via Unix socket IPC. Inspired by [MemGPT](https://arxiv.org/abs/2310.08560) and [Letta](https://github.com/letta-ai/letta).

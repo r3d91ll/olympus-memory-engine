@@ -284,7 +284,7 @@ class MemoryStorage:
     def insert_conversation(
         self,
         agent_id: UUID,
-        role: Literal["user", "assistant", "function"],
+        role: Literal["user", "assistant", "function", "system"],
         content: str,
         function_name: str | None = None,
         function_args: dict[str, Any] | None = None,
