@@ -5,6 +5,7 @@ PostgreSQL + pgvector backend for multi-agent memory
 Adapted from bilateral-experiment ExternalStorage
 """
 
+import os
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
@@ -26,10 +27,11 @@ class MemoryStorage:
                              Default: connects to olympus_memory via Unix socket
         """
         if connection_string is None:
+            pg_user = os.environ.get("PG_USER", os.environ.get("USER", "postgres"))
             connection_string = (
                 "host=/var/run/postgresql "
                 "dbname=olympus_memory "
-                "user=todd"
+                f"user={pg_user}"
             )
 
         self.connection_string = connection_string

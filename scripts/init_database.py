@@ -14,7 +14,7 @@ from psycopg import sql
 # Database connection settings from environment variables
 PG_HOST = os.environ.get("PG_HOST", "/var/run/postgresql")  # Unix socket
 PG_DB = os.environ.get("PG_DB", "olympus_memory")
-PG_USER = os.environ.get("PG_USER", "todd")  # Should match OS user for peer auth
+PG_USER = os.environ.get("PG_USER", os.environ.get("USER", "postgres"))  # Default to OS user for peer auth
 
 
 def main():

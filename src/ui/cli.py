@@ -53,13 +53,20 @@ def main() -> None:
         default=None,
         help="Workspace directory for file operations",
     )
+    parser.add_argument(
+        "--context", "-c",
+        type=int,
+        default=32768,
+        help="Context window size in tokens (default: 32768)",
+    )
     args = parser.parse_args()
 
     console = Console()
 
+    context_k = args.context // 1024
     console.print(Panel(
         "[bold cyan]Olympus Memory Engine[/bold cyan]\n"
-        f"Agent: [green]{args.agent}[/green] | Model: [yellow]{args.model}[/yellow]",
+        f"Agent: [green]{args.agent}[/green] | Model: [yellow]{args.model}[/yellow] | Context: [magenta]{context_k}k[/magenta]",
         title="OME",
         border_style="blue",
     ))
@@ -81,6 +88,7 @@ def main() -> None:
             storage=storage,
             enable_tools=True,
             workspace=args.workspace,
+            context_size=args.context,
         )
         console.print(f"[dim]Agent ready (ID: {agent.agent_id})[/dim]\n")
     except Exception as e:

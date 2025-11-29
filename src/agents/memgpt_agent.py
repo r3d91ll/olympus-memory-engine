@@ -25,10 +25,16 @@ from src.tools.tools import AgentTools
 class OllamaClient:
     """Simple Ollama client for inference and embeddings"""
 
-    def __init__(self, model_id: str = "llama3.1:8b", embedding_model: str = "nomic-embed-text"):
+    def __init__(
+        self,
+        model_id: str = "llama3.1:8b",
+        embedding_model: str = "nomic-embed-text",
+        context_size: int = 32768,  # 32k context window
+    ):
         self.model_id = model_id
         self.embedding_model = embedding_model
-        print(f"[OllamaClient] Using model: {model_id}, embeddings: {embedding_model}")
+        self.context_size = context_size
+        print(f"[OllamaClient] Using model: {model_id}, context: {context_size}, embeddings: {embedding_model}")
 
     def chat(self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.7, debug: bool = False):
         """Chat completion"""
@@ -37,6 +43,7 @@ class OllamaClient:
                 model=self.model_id,
                 messages=messages,
                 options={
+                    "num_ctx": self.context_size,
                     "num_predict": max_tokens,
                     "temperature": temperature,
                 },
@@ -111,10 +118,12 @@ class MemGPTAgent:
         storage: MemoryStorage | None = None,
         enable_tools: bool = True,
         workspace: str | None = None,
+        context_size: int = 32768,  # 32k context window
     ):
         self.name = name
         self.storage = storage or MemoryStorage()
         self.tools = AgentTools(workspace_dir=workspace) if enable_tools else None
+        self.context_size = context_size
 
         # Initialize logging and metrics
         self.logger = get_logger(f"agents.{name}")
@@ -128,7 +137,7 @@ class MemGPTAgent:
             self.agent_id = existing["id"]
             stored_model = existing["model_id"]
             self.model_id = stored_model
-            self.ollama = OllamaClient(model_id=stored_model)
+            self.ollama = OllamaClient(model_id=stored_model, context_size=context_size)
             # Always refresh system memory to latest default (ensures new features are available)
             self.system_memory = self._default_system_memory()
             self.working_memory = existing["working_memory"] or self._default_working_memory()
@@ -150,7 +159,7 @@ class MemGPTAgent:
         else:
             # Create new agent
             self.model_id = model_id
-            self.ollama = OllamaClient(model_id=model_id)
+            self.ollama = OllamaClient(model_id=model_id, context_size=context_size)
             system_mem = self._default_system_memory()
             working_mem = self._default_working_memory()
             self.agent_id = self.storage.create_agent(
