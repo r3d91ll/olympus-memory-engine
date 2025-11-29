@@ -15,7 +15,7 @@ class OllamaClient(LLMClient):
     will raise NotImplementedError.
     """
 
-    def __init__(self, model_id: str = "llama3.1:8b", embedding_model: str = "nomic-embed-text"):
+    def __init__(self, model_id: str = "gpt-oss:20b", embedding_model: str = "nomic-embed-text"):
         super().__init__(model_id, embedding_model)
         print(f"[OllamaClient] Using model: {model_id}, embeddings: {embedding_model}")
 

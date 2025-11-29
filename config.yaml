@@ -2,6 +2,10 @@
 
 # Available models from Ollama
 models:
+  - id: gpt-oss:20b
+    name: GPT-OSS 20B
+    description: Default model - excellent reasoning and tool use
+
   - id: llama3.1:8b
     name: Llama 3.1 8B
     description: Meta's Llama 3.1, good general purpose model
@@ -17,10 +21,6 @@ models:
   - id: qwen2.5-coder:latest
     name: Qwen 2.5 Coder
     description: Specialized coding model
-
-  - id: gpt-oss:20b
-    name: GPT-OSS 20B
-    description: Larger open source model
 
 # Embedding model (don't change unless you update the database schema)
 embedding_model: nomic-embed-text

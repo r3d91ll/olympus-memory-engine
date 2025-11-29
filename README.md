@@ -109,7 +109,7 @@ psql -c "CREATE EXTENSION vector;"
 
 # Ollama for local LLM + embeddings
 curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull llama3.1:8b
+ollama pull gpt-oss:20b
 ollama pull nomic-embed-text
 ```
 
@@ -129,7 +129,7 @@ poetry run python scripts/init_database.py
 ### Run Interactive Chat
 
 ```bash
-poetry run olympus
+poetry run ome
 ```
 
 ### Example Session
@@ -171,12 +171,12 @@ embedding:
 
 agents:
   alice:
-    model: llama3.1:8b
+    model: gpt-oss:20b
     system_prompt: "You are Alice, a helpful research assistant."
     tools_enabled: true
 
   bob:
-    model: qwen2.5-coder:latest
+    model: gpt-oss:20b
     system_prompt: "You are Bob, a software engineer."
     tools_enabled: true
 ```

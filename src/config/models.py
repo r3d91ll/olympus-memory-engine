@@ -205,7 +205,7 @@ class OMEConfig(BaseModel):
 
     # Default model for new agents
     default_model: str = Field(
-        default="llama3.1:8b",
+        default="gpt-oss:20b",
         description="Default Ollama model for agents"
     )
     default_agent: str = Field(

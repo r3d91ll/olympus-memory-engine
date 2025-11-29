@@ -8,9 +8,58 @@ import json
 import re
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Deque
 
 import ollama
+
+
+@dataclass
+class ResponseMetrics:
+    """Performance metrics for a single chat response."""
+
+    # LLM timing
+    llm_latency_ms: float = 0.0
+    llm_tokens_in: int = 0
+    llm_tokens_out: int = 0
+    tokens_per_sec: float = 0.0
+
+    # Memory timing
+    memory_search_ms: float = 0.0
+    memory_save_ms: float = 0.0
+    embed_latency_ms: float = 0.0
+
+    # Tool timing
+    tool_calls: int = 0
+    tool_latency_ms: float = 0.0
+
+    # Total
+    total_latency_ms: float = 0.0
+
+    def summary(self) -> str:
+        """Format metrics as a compact summary string."""
+        parts = []
+
+        # LLM stats
+        if self.llm_latency_ms > 0:
+            parts.append(f"LLM: {self.llm_latency_ms:.0f}ms")
+            if self.tokens_per_sec > 0:
+                parts.append(f"{self.tokens_per_sec:.1f} tok/s")
+
+        # Memory stats
+        if self.memory_search_ms > 0:
+            parts.append(f"search: {self.memory_search_ms:.0f}ms")
+        if self.memory_save_ms > 0:
+            parts.append(f"save: {self.memory_save_ms:.0f}ms")
+
+        # Tool stats
+        if self.tool_calls > 0:
+            parts.append(f"tools: {self.tool_calls}x/{self.tool_latency_ms:.0f}ms")
+
+        # Total
+        parts.append(f"total: {self.total_latency_ms:.0f}ms")
+
+        return " | ".join(parts)
 
 from src.infrastructure.logging_config import (
     get_logger,
@@ -27,7 +76,7 @@ class OllamaClient:
 
     def __init__(
         self,
-        model_id: str = "llama3.1:8b",
+        model_id: str = "gpt-oss:20b",
         embedding_model: str = "nomic-embed-text",
         context_size: int = 32768,  # 32k context window
     ):
@@ -36,8 +85,21 @@ class OllamaClient:
         self.context_size = context_size
         print(f"[OllamaClient] Using model: {model_id}, context: {context_size}, embeddings: {embedding_model}")
 
-    def chat(self, messages: list[dict], max_tokens: int = 2048, temperature: float = 0.7, debug: bool = False):
-        """Chat completion"""
+    def chat(
+        self,
+        messages: list[dict],
+        max_tokens: int = 2048,
+        temperature: float = 0.7,
+        debug: bool = False,
+    ) -> tuple[str, dict[str, Any]]:
+        """Chat completion with timing metrics.
+
+        Returns:
+            (content, metrics) where metrics contains latency_ms, tokens_in, tokens_out, tokens_per_sec
+        """
+        start_time = time.time()
+        metrics: dict[str, Any] = {}
+
         try:
             response = ollama.chat(  # type: ignore[call-overload]
                 model=self.model_id,
@@ -48,8 +110,28 @@ class OllamaClient:
                     "temperature": temperature,
                 },
             )
+
+            latency_ms = (time.time() - start_time) * 1000
             message = response["message"]
             content = message.get("content", "")
+
+            # Extract token counts from Ollama response if available
+            tokens_in = response.get("prompt_eval_count", 0)
+            tokens_out = response.get("eval_count", 0)
+            eval_duration_ns = response.get("eval_duration", 0)
+
+            # Calculate tokens/sec from Ollama's eval_duration (nanoseconds)
+            if eval_duration_ns > 0 and tokens_out > 0:
+                tokens_per_sec = tokens_out / (eval_duration_ns / 1e9)
+            else:
+                tokens_per_sec = 0.0
+
+            metrics = {
+                "latency_ms": latency_ms,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "tokens_per_sec": tokens_per_sec,
+            }
 
             # Debug: show full response structure for GPT-OSS
             if debug or ('gpt-oss' in self.model_id.lower() and len(content) < 10):
@@ -70,18 +152,18 @@ class OllamaClient:
                     args = tc.get("function", {}).get("arguments", {})
                     results.append(f'{{"function": "{func_name}", "arguments": {json.dumps(args)}}}')
                 # Return as JSON for our parser to handle
-                return "```json\n" + "\n".join(results) + "\n```"
+                return "```json\n" + "\n".join(results) + "\n```", metrics
 
             # Strip <think> tags if present (for non-Harmony models)
             if '<think>' in content.lower():
                 content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE)
 
-            return content.strip()
+            return content.strip(), metrics
         except Exception as e:
             # If response is too long or other error, return graceful message
             error_msg = str(e)
             if "parsing tool call" in error_msg or "unexpected end" in error_msg:
-                return "I apologize, my response was too long. Let me give you a simpler version."
+                return "I apologize, my response was too long. Let me give you a simpler version.", metrics
             raise
 
     def stop(self):
@@ -93,13 +175,19 @@ class OllamaClient:
         except Exception as e:
             print(f"[OllamaClient] Failed to stop model: {e}")
 
-    def embed(self, text: str) -> list[float]:
-        """Generate 768-dim embedding"""
+    def embed(self, text: str) -> tuple[list[float], float]:
+        """Generate 768-dim embedding with timing.
+
+        Returns:
+            (embedding, latency_ms)
+        """
+        start_time = time.time()
         response = ollama.embeddings(
             model=self.embedding_model,
             prompt=text,
         )
-        return list(response["embedding"])  # type: ignore[return-value]
+        latency_ms = (time.time() - start_time) * 1000
+        return list(response["embedding"]), latency_ms  # type: ignore[return-value]
 
 
 class MemGPTAgent:
@@ -114,7 +202,7 @@ class MemGPTAgent:
     def __init__(
         self,
         name: str,
-        model_id: str = "llama3.1:8b",
+        model_id: str = "gpt-oss:20b",
         storage: MemoryStorage | None = None,
         enable_tools: bool = True,
         workspace: str | None = None,
@@ -324,30 +412,49 @@ Current Context: Fresh start, no prior context
 
         return "\n".join(parts)
 
-    def save_memory(self, content: str) -> str:
+    def save_memory(self, content: str, response_metrics: ResponseMetrics | None = None) -> str:
         """Save to archival memory with embedding"""
-        embedding = self.ollama.embed(content)
+        embedding, embed_ms = self.ollama.embed(content)
+
+        save_start = time.time()
         self.storage.insert_memory(
             agent_id=self.agent_id,
             content=content,
             memory_type="archival",
             embedding=embedding,
         )
+        save_ms = (time.time() - save_start) * 1000
+
+        # Update response metrics if provided
+        if response_metrics:
+            response_metrics.memory_save_ms += save_ms
+            response_metrics.embed_latency_ms += embed_ms
+
         self.logger.info("Saved to archival memory", extra={
             'extra_data': {'content_preview': content[:100]}
         })
         self.metrics.record_memory_operation(self.name, "save")
         return f"✓ Saved to archival memory: {content[:60]}..."
 
-    def search_memory(self, query: str, limit: int = 3) -> str:
+    def search_memory(
+        self, query: str, limit: int = 3, response_metrics: ResponseMetrics | None = None
+    ) -> str:
         """Search archival memory"""
-        query_emb = self.ollama.embed(query)
+        query_emb, embed_ms = self.ollama.embed(query)
+
+        search_start = time.time()
         results = self.storage.search_memory(
             agent_id=self.agent_id,
             query_embedding=query_emb,
             memory_type="archival",
             limit=limit,
         )
+        search_ms = (time.time() - search_start) * 1000
+
+        # Update response metrics if provided
+        if response_metrics:
+            response_metrics.memory_search_ms += search_ms
+            response_metrics.embed_latency_ms += embed_ms
 
         self.logger.info("Searched archival memory", extra={
             'extra_data': {'query': query, 'results_count': len(results)}
@@ -429,17 +536,25 @@ Current Context: Fresh start, no prior context
 
         return final_content, function_calls
 
-    def _execute_harmony_function_calls(self, function_calls: list[dict]) -> str:
+    def _execute_harmony_function_calls(
+        self, function_calls: list[dict], response_metrics: ResponseMetrics | None = None
+    ) -> str:
         """Execute function calls from Harmony format and return results."""
         results = []
         for call in function_calls:
             func_name = call.get("function", "")
             args = call.get("arguments", {})
-            result = self._execute_single_function(func_name, args)
+            result = self._execute_single_function(func_name, args, response_metrics)
             results.append(f"[{func_name}]: {result}")
         return "\n".join(results)
 
-    def _execute_function_calls_with_followup(self, response: str, messages: list[dict], max_rounds: int = 5) -> tuple[str, bool]:
+    def _execute_function_calls_with_followup(
+        self,
+        response: str,
+        messages: list[dict],
+        response_metrics: ResponseMetrics,
+        max_rounds: int = 5,
+    ) -> tuple[str, bool]:
         """Execute function calls and send results back to model for processing.
 
         This handles the tool call loop:
@@ -469,7 +584,7 @@ Current Context: Fresh start, no prior context
                 # No function calls in this response
                 if round_num == 0:
                     # First round, no tool calls at all
-                    return self._execute_function_calls(current_response), False
+                    return self._execute_function_calls(current_response, response_metrics), False
                 else:
                     # Later round, we've processed some tools and now have final response
                     return current_response, had_any_tool_calls
@@ -490,7 +605,7 @@ Current Context: Fresh start, no prior context
 
                         func_name = func_call["function"]
                         args = func_call.get("arguments", {})
-                        result = self._execute_single_function(func_name, args)
+                        result = self._execute_single_function(func_name, args, response_metrics)
                         all_results.append({
                             "function": func_name,
                             "result": result
@@ -516,7 +631,12 @@ Current Context: Fresh start, no prior context
 
             # Call model again to process results
             print(f"[{self.name}] Tool call round {round_num + 1}: sending results back to model...")
-            current_response = self.ollama.chat(messages, max_tokens=1024, debug=True)
+            current_response, llm_metrics = self.ollama.chat(messages, max_tokens=1024, debug=True)
+
+            # Accumulate LLM metrics from follow-up calls
+            response_metrics.llm_latency_ms += llm_metrics.get("latency_ms", 0)
+            response_metrics.llm_tokens_in += llm_metrics.get("tokens_in", 0)
+            response_metrics.llm_tokens_out += llm_metrics.get("tokens_out", 0)
 
             # Empty response means the model only produced tool_calls (handled by Ollama wrapper)
             if current_response.strip() == "":
@@ -527,7 +647,9 @@ Current Context: Fresh start, no prior context
         print(f"[{self.name}] Warning: Reached max tool call rounds ({max_rounds})")
         return current_response, had_any_tool_calls
 
-    def _execute_function_calls(self, response: str) -> str:
+    def _execute_function_calls(
+        self, response: str, response_metrics: ResponseMetrics | None = None
+    ) -> str:
         """Execute function calls found in the response (JSON format)"""
 
         # Check if using Harmony format
@@ -535,7 +657,7 @@ Current Context: Fresh start, no prior context
             final_content, function_calls = self._parse_harmony_response(response)
 
             if function_calls:
-                results = self._execute_harmony_function_calls(function_calls)
+                results = self._execute_harmony_function_calls(function_calls, response_metrics)
                 # Combine final content with function results
                 if final_content:
                     return f"{final_content}\n\n{results}"
@@ -582,7 +704,7 @@ Current Context: Fresh start, no prior context
                     args = func_call.get("arguments", {})
 
                     # Execute the function
-                    result = self._execute_single_function(func_name, args)
+                    result = self._execute_single_function(func_name, args, response_metrics)
                     call_results.append(result)
 
                 # Replace JSON block with results
@@ -607,7 +729,9 @@ Current Context: Fresh start, no prior context
 
         return response
 
-    def _execute_single_function(self, func_name: str, args: dict) -> str:
+    def _execute_single_function(
+        self, func_name: str, args: dict, response_metrics: ResponseMetrics | None = None
+    ) -> str:
         """Execute a single function call and return result"""
         start_time = time.time()
         success = False
@@ -621,12 +745,12 @@ Current Context: Fresh start, no prior context
             # Memory functions
             if func_name == "save_memory":
                 content = args.get("content", "")
-                result = self.save_memory(content)
+                result = self.save_memory(content, response_metrics)
                 success = True
 
             elif func_name == "search_memory":
                 query = args.get("query", "")
-                result = self.search_memory(query)
+                result = self.search_memory(query, response_metrics=response_metrics)
                 success = True
 
             elif func_name == "update_working_memory":
@@ -717,6 +841,13 @@ Current Context: Fresh start, no prior context
 
         # Log the function call and record metrics
         duration = time.time() - start_time
+        duration_ms = duration * 1000
+
+        # Update response metrics if provided
+        if response_metrics:
+            response_metrics.tool_calls += 1
+            response_metrics.tool_latency_ms += duration_ms
+
         log_function_call(
             agent_name=self.name,
             function_name=func_name,
@@ -782,8 +913,16 @@ Current Context: Fresh start, no prior context
 
         return False, ""
 
-    def chat(self, user_message: str) -> str:
-        """Process user message and generate response"""
+    def chat(self, user_message: str) -> tuple[str, ResponseMetrics]:
+        """Process user message and generate response with performance metrics.
+
+        Returns:
+            (response_text, metrics) tuple
+        """
+        total_start = time.time()
+
+        # Initialize metrics for this response
+        response_metrics = ResponseMetrics()
 
         # Log incoming user message
         self.logger.info("Processing user message", extra={
@@ -800,7 +939,6 @@ Current Context: Fresh start, no prior context
         requires_function, hint = self._detect_function_intent(user_message)
 
         # Generate response
-        llm_start = time.time()
         if requires_function:
             # Add strategic hint to increase function calling reliability
             enhanced_message = f"{user_message}\n\n{hint}"
@@ -814,28 +952,36 @@ Current Context: Fresh start, no prior context
                 {"role": "user", "content": user_message},
             ]
 
-        response = self.ollama.chat(messages, max_tokens=512)
-        llm_duration = time.time() - llm_start
+        response, llm_metrics = self.ollama.chat(messages, max_tokens=512)
+
+        # Populate LLM metrics
+        response_metrics.llm_latency_ms = llm_metrics.get("latency_ms", 0)
+        response_metrics.llm_tokens_in = llm_metrics.get("tokens_in", 0)
+        response_metrics.llm_tokens_out = llm_metrics.get("tokens_out", 0)
+        response_metrics.tokens_per_sec = llm_metrics.get("tokens_per_sec", 0)
 
         # Log LLM interaction
         self.logger.info("LLM response generated", extra={
             'extra_data': {
                 'model': self.model_id,
-                'latency_seconds': llm_duration,
+                'latency_ms': response_metrics.llm_latency_ms,
+                'tokens_per_sec': response_metrics.tokens_per_sec,
                 'response_preview': response[:100] if response else "(tool call)"
             }
         })
-        # Record LLM metrics (Ollama doesn't provide token counts, so we estimate)
+        # Record LLM metrics for Prometheus
         self.metrics.record_llm_request(
             agent=self.name,
             model=self.model_id,
-            latency=llm_duration,
-            input_tokens=len(context.split()) // 4,  # Rough estimate
-            output_tokens=len(response.split()) // 4 if response else 0
+            latency=response_metrics.llm_latency_ms / 1000,
+            input_tokens=response_metrics.llm_tokens_in,
+            output_tokens=response_metrics.llm_tokens_out,
         )
 
         # Execute any function calls and handle tool response loop
-        response, _ = self._execute_function_calls_with_followup(response, messages)
+        response, _ = self._execute_function_calls_with_followup(
+            response, messages, response_metrics
+        )
 
         # Add response to FIFO
         self.fifo_queue.append({"role": "assistant", "content": response})
@@ -852,7 +998,10 @@ Current Context: Fresh start, no prior context
             content=response,
         )
 
-        return response
+        # Calculate total latency
+        response_metrics.total_latency_ms = (time.time() - total_start) * 1000
+
+        return response, response_metrics
 
     def get_stats(self) -> dict:
         """Get agent memory statistics"""
@@ -882,10 +1031,10 @@ def demo():
     print("=" * 70)
 
     storage = MemoryStorage()
-    agent = MemGPTAgent(name="demo-agent", model_id="llama3.1:8b", storage=storage)
+    agent = MemGPTAgent(name="demo-agent", model_id="gpt-oss:20b", storage=storage)
 
     print(f"\nAgent: {agent.name}")
-    print("Model: llama3.1:8b")
+    print("Model: gpt-oss:20b")
     print(f"Agent ID: {agent.agent_id}")
 
     # Conversation
@@ -902,8 +1051,9 @@ def demo():
 
     for msg in messages:
         print(f"\n👤 USER: {msg}")
-        response = agent.chat(msg)
+        response, metrics = agent.chat(msg)
         print(f"🤖 {agent.name.upper()}: {response}")
+        print(f"   [{metrics.summary()}]")
 
     # Show stats
     print("\n" + "=" * 70)

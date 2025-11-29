@@ -44,8 +44,8 @@ def main() -> None:
     parser.add_argument(
         "--model", "-m",
         type=str,
-        default="llama3.1:8b",
-        help="Ollama model ID (default: llama3.1:8b)",
+        default="gpt-oss:20b",
+        help="Ollama model ID (default: gpt-oss:20b)",
     )
     parser.add_argument(
         "--workspace", "-w",
@@ -152,8 +152,9 @@ def main() -> None:
 
             # Get response from agent
             try:
-                response = agent.chat(user_input)
-                console.print(f"\n[bold blue]{args.agent}:[/bold blue] {response}\n")
+                response, metrics = agent.chat(user_input)
+                console.print(f"\n[bold blue]{args.agent}:[/bold blue] {response}")
+                console.print(f"[dim]{metrics.summary()}[/dim]\n")
             except KeyboardInterrupt:
                 console.print("\n[yellow]Interrupted[/yellow]\n")
                 continue

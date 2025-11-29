@@ -20,8 +20,8 @@ ollama --version
 ### 1. Install Dependencies
 
 ```bash
-cd ~/olympus/systems/memory-engine/prototype
-pip3 install -r requirements.txt
+cd olympus-memory-engine
+poetry install
 ```
 
 ### 2. Setup Database
@@ -33,96 +33,95 @@ createdb olympus_memory
 # Install pgvector extension
 psql olympus_memory -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-# Run schema
-psql olympus_memory < sql/schema.sql
+# Initialize schema
+poetry run python scripts/init_database.py
 ```
 
 ### 3. Setup Ollama Models
 
 ```bash
-ollama pull llama3.1:8b
-ollama pull qwen2.5-coder:latest
+ollama pull gpt-oss:20b
 ollama pull nomic-embed-text
 ```
 
-### 4. Configure Environment
+### 4. Run Interactive Chat
 
 ```bash
-export POSTGRES_USER=your_username
-export POSTGRES_PASSWORD=your_password
+poetry run ome
 ```
 
-### 5. Verify Installation
+You'll see:
+```
+╭──────────────────────────────────────────────────────╮
+│               Olympus Memory Engine                  │
+│ Agent: assistant | Model: gpt-oss:20b | Context: 32k│
+╰──────────────────────────────────────────────────────╯
+Connected to PostgreSQL
+Agent ready (ID: 8ae88392-35fb-4256-b912-8b19cd788a63)
+
+Type 'quit' or 'exit' to stop. Ctrl+C to interrupt.
+
+You:
+```
+
+### 5. Try Some Commands
+
+```
+You: Remember that I prefer Python for scripting
+assistant: ✓ Saved to archival memory: User prefers Python for scripting...
+LLM: 234ms | 45.2 tok/s | save: 12ms | total: 312ms
+
+You: What do you remember about me?
+assistant: Found 1 memories:
+1. User prefers Python for scripting (similarity: 0.892)
+LLM: 198ms | 52.1 tok/s | search: 8ms | total: 245ms
+
+You: Create a file called hello.py with a simple greeting
+assistant: ✓ Created file: hello.py
+LLM: 312ms | 38.4 tok/s | tools: 1x/15ms | total: 412ms
+
+You: /stats
+╭─────────────────────────────────╮
+│          Agent Stats            │
+│ Agent: assistant                │
+│ Archival memories: 1            │
+│ Conversation messages: 4        │
+│ FIFO queue size: 4              │
+│ Working memory: 256 chars       │
+╰─────────────────────────────────╯
+```
+
+## CLI Options
 
 ```bash
-# Run infrastructure test
-python3 tests/test_infrastructure.py
+# Use a different model
+poetry run ome --model llama3.1:8b
 
-# Should see: "✓ All infrastructure tests passed!"
-```
+# Custom agent name
+poetry run ome --agent researcher
 
-## First Run
+# Set workspace directory
+poetry run ome --workspace ~/projects/myproject
 
-### Option 1: Interactive Multi-Agent Chat
+# Larger context window (up to 128k)
+poetry run ome --context 131072
 
-```bash
-python3 scripts/multi_agent_chat.py
-```
-
-Then try:
-```
-> alice: tell bob to create a hello.txt file
-> bob: read the hello.txt file
-```
-
-### Option 2: Bug Fixing Experiment
-
-```bash
-python3 scripts/run_bug_fixing_experiment.py
-```
-
-Watch Alice and Bob collaborate to fix bugs!
-
-### Option 3: Python REPL
-
-```python
-from src.agents.agent_manager import AgentManager
-from pathlib import Path
-
-# Create manager and agents
-manager = AgentManager(config_file=Path("config.yaml"))
-manager.create_agent_from_config("alice")
-
-# Chat
-response, stats = manager.route_message("alice", "Hello! What can you do?")
-print(response)
+# All options
+poetry run ome --help
 ```
 
 ## Common Commands
 
 ```bash
 # Run tests
-pytest tests/test_*.py -v
+poetry run pytest
 
-# Check types
-mypy src/
+# Type checking
+poetry run mypy src --pretty
 
-# Run experiment
-python3 scripts/run_bug_fixing_experiment.py
-
-# View logs
-tail -f logs/agent_system_*.log
-
-# View metrics
-cat metrics/agent_metrics.prom
+# Format code
+poetry run ruff format src tests
 ```
-
-## Next Steps
-
-1. **Read the full README:** [README.md](README.md)
-2. **Learn about infrastructure:** [docs/infrastructure_guide.md](docs/infrastructure_guide.md)
-3. **Design experiments:** [docs/bug_fixing_experiment.md](docs/bug_fixing_experiment.md)
-4. **Modify config:** Edit `config.yaml` to add agents or experiments
 
 ## Troubleshooting
 
@@ -135,31 +134,32 @@ sudo systemctl start postgresql
 **"Model not found" error:**
 ```bash
 # Pull models
-ollama pull llama3.1:8b
+ollama pull gpt-oss:20b
 ollama pull nomic-embed-text
 ```
 
 **Import errors:**
 ```bash
-# Ensure in correct directory
-cd ~/olympus/systems/memory-engine/prototype
-
-# Add to PYTHONPATH
-export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+# Use poetry to run
+poetry run ome
 ```
 
-**Permission denied:**
-```bash
-# Check database user
-psql -l
+## Performance Metrics
 
-# Update environment variables
-export POSTGRES_USER=your_username
-export POSTGRES_PASSWORD=your_password
+Every response shows performance metrics:
+```
+LLM: 234ms | 45.2 tok/s | search: 8ms | save: 12ms | tools: 2x/45ms | total: 312ms
 ```
 
-## Help
+- **LLM**: Time for model inference
+- **tok/s**: Tokens generated per second
+- **search**: Memory search latency
+- **save**: Memory save latency
+- **tools**: Number of tool calls and total tool time
+- **total**: End-to-end response time
 
-- Full documentation: [README.md](README.md)
-- Testing guide: [docs/testing_guide.md](docs/testing_guide.md)
-- Infrastructure guide: [docs/infrastructure_guide.md](docs/infrastructure_guide.md)
+## Next Steps
+
+1. **Read the full README:** [README.md](README.md)
+2. **Learn about the architecture:** Memory tiers, tool system, security
+3. **Customize your agent:** Edit system prompts and working memory
