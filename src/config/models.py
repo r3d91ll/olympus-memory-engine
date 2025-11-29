@@ -197,17 +197,6 @@ class AgentConfig(BaseModel):
         return v
 
 
-class ExternalActorConfig(BaseModel):
-    """Configuration for external actors (humans, external systems)."""
-
-    actor_id: str = Field(description="Unique actor identifier")
-    actor_type: Literal["human", "system", "api"] = Field(
-        default="human",
-        description="Type of external actor"
-    )
-    description: str = Field(default="", description="Actor description")
-
-
 class OMEConfig(BaseModel):
     """Root configuration for Olympus Memory Engine.
 
@@ -237,12 +226,6 @@ class OMEConfig(BaseModel):
     agents: list[AgentConfig] = Field(
         default_factory=list,
         description="Pre-configured agents"
-    )
-
-    # External actor configurations
-    external_actors: list[ExternalActorConfig] = Field(
-        default_factory=list,
-        description="Pre-configured external actors"
     )
 
     # Model registry (available models)
@@ -282,8 +265,12 @@ def load_config(config_path: Path | str = Path("config.yaml")) -> OMEConfig:
     if isinstance(config_path, str):
         config_path = Path(config_path)
 
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         raw_config = yaml.safe_load(f)
+
+    # Handle empty config file
+    if raw_config is None:
+        raw_config = {}
 
     # Handle legacy config format where agents is a list of dicts
     if "agents" in raw_config and isinstance(raw_config["agents"], list):
@@ -293,12 +280,7 @@ def load_config(config_path: Path | str = Path("config.yaml")) -> OMEConfig:
                 agents.append(AgentConfig(**agent))
         raw_config["agents"] = agents
 
-    # Handle legacy external_actors format
-    if "external_actors" in raw_config and isinstance(raw_config["external_actors"], list):
-        actors = []
-        for actor in raw_config["external_actors"]:
-            if isinstance(actor, dict):
-                actors.append(ExternalActorConfig(**actor))
-        raw_config["external_actors"] = actors
+    # Remove external_actors if present (no longer used)
+    raw_config.pop("external_actors", None)
 
     return OMEConfig(**raw_config)

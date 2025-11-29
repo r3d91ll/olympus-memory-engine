@@ -5,21 +5,19 @@ Designed for future C++/Mojo portability.
 """
 
 from src.config.models import (
+    AgentConfig,
     HarmonyFormatConfig,
     MemoryConfig,
     OllamaModelConfig,
-    AgentConfig,
-    ExternalActorConfig,
     OMEConfig,
     load_config,
 )
 
 __all__ = [
+    "AgentConfig",
     "HarmonyFormatConfig",
+    "load_config",
     "MemoryConfig",
     "OllamaModelConfig",
-    "AgentConfig",
-    "ExternalActorConfig",
     "OMEConfig",
-    "load_config",
 ]

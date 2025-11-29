@@ -32,15 +32,17 @@ class TraceExporter:
 
     def __init__(self, connection_string: str | None = None):
         if connection_string is None:
+            import os
+            pg_user = os.environ.get("PG_USER", os.environ.get("USER", "postgres"))
             connection_string = (
                 "host=/var/run/postgresql "
                 "dbname=olympus_memory "
-                "user=todd"
+                f"user={pg_user}"
             )
         self.pool = ConnectionPool(connection_string, min_size=1, max_size=2)
         print("[TraceExporter] Connected to database")
 
-    def close(self):
+    def close(self) -> None:
         self.pool.close()
 
     def get_agents(self) -> list[dict[str, Any]]:
@@ -80,25 +82,44 @@ class TraceExporter:
             params["since"] = since
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
-        limit_sql = f"LIMIT {limit}" if limit else ""
 
-        query = f"""
-            SELECT
-                c.id,
-                c.agent_id,
-                a.name as agent_name,
-                a.model_id,
-                c.role,
-                c.content,
-                c.function_name,
-                c.function_args,
-                c.created_at
-            FROM conversation_history c
-            JOIN agents a ON c.agent_id = a.id
-            WHERE {where_sql}
-            ORDER BY c.created_at ASC
-            {limit_sql}
-        """
+        # Build query with optional LIMIT (parameterized to prevent SQL injection)
+        if limit is not None:
+            query = f"""
+                SELECT
+                    c.id,
+                    c.agent_id,
+                    a.name as agent_name,
+                    a.model_id,
+                    c.role,
+                    c.content,
+                    c.function_name,
+                    c.function_args,
+                    c.created_at
+                FROM conversation_history c
+                JOIN agents a ON c.agent_id = a.id
+                WHERE {where_sql}
+                ORDER BY c.created_at ASC
+                LIMIT %(limit)s
+            """
+            params["limit"] = limit
+        else:
+            query = f"""
+                SELECT
+                    c.id,
+                    c.agent_id,
+                    a.name as agent_name,
+                    a.model_id,
+                    c.role,
+                    c.content,
+                    c.function_name,
+                    c.function_args,
+                    c.created_at
+                FROM conversation_history c
+                JOIN agents a ON c.agent_id = a.id
+                WHERE {where_sql}
+                ORDER BY c.created_at ASC
+            """
 
         with self.pool.connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -315,10 +336,10 @@ def main():
             stats = exporter.get_statistics()
             print(f"Agents: {stats['agents']}")
             print(f"Total Messages: {stats['total_messages']}")
-            print(f"\nBy Role:")
+            print("\nBy Role:")
             for role, count in stats["by_role"].items():
                 print(f"  {role}: {count}")
-            print(f"\nFunction Calls:")
+            print("\nFunction Calls:")
             for func, count in stats["function_calls"].items():
                 print(f"  {func}: {count}")
             if stats["first_message"]:
@@ -331,7 +352,7 @@ def main():
             since = datetime.fromisoformat(args.since)
 
         # Get conversations
-        print(f"\nFetching conversations...")
+        print("\nFetching conversations...")
         conversations = exporter.get_conversations(
             agent_name=args.agent,
             since=since,

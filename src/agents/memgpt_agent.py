@@ -14,7 +14,6 @@ import ollama
 
 from src.infrastructure.logging_config import (
     get_logger,
-    log_agent_message,
     log_function_call,
     set_context,
 )
@@ -111,15 +110,11 @@ class MemGPTAgent:
         model_id: str = "llama3.1:8b",
         storage: MemoryStorage | None = None,
         enable_tools: bool = True,
-        agent_manager=None,
         workspace: str | None = None,
     ):
         self.name = name
         self.storage = storage or MemoryStorage()
         self.tools = AgentTools(workspace_dir=workspace) if enable_tools else None
-        self.agent_manager = agent_manager  # For agent-to-agent communication
-        self._message_depth = 0  # Track recursion depth to prevent infinite loops
-        self._max_message_depth = 1  # Maximum allowed recursion depth
 
         # Initialize logging and metrics
         self.logger = get_logger(f"agents.{name}")
@@ -197,20 +192,19 @@ Format for multiple functions (will be executed in order):
 ```
 
 EXECUTION EXAMPLES (Correct Behavior):
-User: "Tell Bob to create hello.txt"
-You: ```json
-{{"function": "message_agent", "arguments": {{"agent_name": "bob", "message": "Please create hello.txt"}}}}
-```
-
 User: "Save that I prefer Python"
 You: ```json
 {{"function": "save_memory", "arguments": {{"content": "User prefers Python programming language"}}}}
 ```
 
+User: "What do you remember about me?"
+You: ```json
+{{"function": "search_memory", "arguments": {{"query": "user preferences"}}}}
+```
+
 ANTI-PATTERNS (Incorrect - DO NOT DO THIS):
-❌ "I'll send a message to Bob asking him to create the file..."
-❌ "Let me use the message_agent function to contact Bob..."
 ❌ "I should save this to memory using save_memory..."
+❌ "Let me search my memory for that..."
 
 ✅ Just output the JSON. No preamble. No explanation.
 
@@ -225,38 +219,6 @@ Memory Functions:
 
 - update_working_memory: Update your working memory with current context
   Arguments: {{"text": "text to add"}}
-
-Agent Communication:
-- message_agent: Send a message to another INTERNAL agent and get their real response
-  Arguments: {{"agent_name": "name", "message": "your message"}}
-  IMPORTANT: DO NOT make up responses. The function will return the agent's actual response.
-
-UNDERSTANDING PARTICIPANTS:
-
-You interact with two types of participants:
-
-EXTERNAL ACTORS (outside Olympus - NEVER use message_agent):
-→ These are users or external systems interacting WITH Olympus
-→ Examples: todd (human), claude (AI assistant), testers
-→ Respond DIRECTLY to them in your chat response
-→ They CANNOT receive message_agent() calls
-→ You'll see "[SYSTEM] <name> joined" when they enter
-
-INTERNAL AGENTS (inside Olympus - CAN use message_agent):
-→ These are other agents running ON the Olympus server
-→ Examples: alice, bob, coder, qwen, assistant (your peers)
-→ Use message_agent() to collaborate with them
-→ They have their own memory and tools
-
-When to use message_agent():
-✓ User asks you to tell/ask another INTERNAL agent something
-✓ Task would be better handled by specialist INTERNAL agent
-✓ Need to collaborate with another INTERNAL agent
-
-When to respond directly:
-✓ User is asking YOU a question
-✓ User is an EXTERNAL actor (they're outside the agent network)
-✓ Question or task is for you, not for delegation
 
 Your memory is organized in tiers:
 1. System Memory: These instructions (read-only)
@@ -342,22 +304,11 @@ Current Context: Fresh start, no prior context
             "=== SYSTEM MEMORY ===",
             self.system_memory,
             "",
-        ]
-
-        # Add participant list if agent_manager available
-        if self.agent_manager:
-            participant_list = self.agent_manager.get_participant_list()
-            parts.extend([
-                participant_list,
-                "",
-            ])
-
-        parts.extend([
             "=== WORKING MEMORY ===",
             self.working_memory,
             "",
             "=== RECENT CONVERSATION ===",
-        ])
+        ]
 
         for msg in self.fifo_queue:
             parts.append(f"{msg['role'].upper()}: {msg['content']}")
@@ -415,113 +366,6 @@ Current Context: Fresh start, no prior context
         })
         self.metrics.record_memory_operation(self.name, "update")
         return "✓ Updated working memory"
-
-    def _clean_agent_response(self, response: str) -> str:
-        """Clean agent response by removing internal context markers and system prompts.
-
-        This prevents context bleeding where internal memory structures
-        appear in agent-to-agent communication.
-        """
-        # Remove context section markers
-        lines = response.split('\n')
-        cleaned_lines = []
-        skip_section = False
-
-        for line in lines:
-            # Detect section markers
-            if line.strip() in ['=== SYSTEM MEMORY ===', '=== WORKING MEMORY ===',
-                               '=== RECENT CONVERSATION ===']:
-                skip_section = True
-                continue
-
-            # If we hit a non-marker line after skipping, check if it's content
-            if skip_section:
-                # Check if this looks like actual response content vs internal state
-                if line and not line.startswith(('You are', 'Agent:', 'Status:',
-                                                  'Current Context:', 'CRITICAL INSTRUCTION',
-                                                  'FUNCTION CALLING:', 'USER:', 'ASSISTANT:')):
-                    skip_section = False
-                    cleaned_lines.append(line)
-                elif not line.strip():
-                    # Keep blank lines unless we're still in skip mode
-                    if cleaned_lines and not skip_section:
-                        cleaned_lines.append(line)
-            else:
-                cleaned_lines.append(line)
-
-        cleaned = '\n'.join(cleaned_lines).strip()
-
-        # If cleaning removed everything, return a fallback
-        if not cleaned:
-            # Try to extract just the last substantive line from original response
-            substantive_lines = [l for l in lines if l.strip() and
-                               not l.strip().startswith('===') and
-                               not l.strip().startswith(('You are', 'Agent:', 'Status:'))]
-            if substantive_lines:
-                cleaned = substantive_lines[-1].strip()
-            else:
-                cleaned = "[Agent response was empty or contained only internal state]"
-
-        return cleaned
-
-    def message_agent(self, agent_name: str, message: str) -> str:
-        """Send a message to another agent and get response"""
-        if not self.agent_manager:
-            return "✗ Cannot message agents (no agent manager available)"
-
-        # Check if target is an external actor (defensive programming)
-        if agent_name in self.agent_manager.external_actors:
-            error_msg = (
-                f"ERROR: '{agent_name}' is an external actor, not an internal agent. "
-                f"External actors cannot receive message_agent() calls. "
-                f"Please respond directly to them in your chat response instead."
-            )
-            self.logger.warning(f"Attempted to message external actor: {agent_name}")
-            return error_msg
-
-        # Check recursion depth to prevent infinite loops
-        if self._message_depth >= self._max_message_depth:
-            self.logger.warning(f"Recursion limit reached when messaging {agent_name}")
-            return f"[@{agent_name}]: [Message suppressed - recursion limit reached]"
-
-        try:
-            # Increment depth before calling
-            self._message_depth += 1
-
-            # Log outgoing message
-            log_agent_message(
-                sender=self.name,
-                recipient=agent_name,
-                message=message
-            )
-            # Record message metric
-            self.metrics.record_message(sender=self.name, recipient=agent_name)
-
-            # Add context that this is from another agent
-            contextual_message = f"[Message from agent {self.name}]: {message}\n\nIMPORTANT: Respond with a short, direct answer. Do NOT call message_agent in your response."
-
-            # Route message through agent manager
-            response, stats = self.agent_manager.route_message(agent_name, contextual_message)
-
-            # Clean the response to remove context bleeding
-            cleaned_response = self._clean_agent_response(response)
-
-            # Decrement depth after calling
-            self._message_depth -= 1
-
-            self.logger.info(f"Received response from {agent_name}", extra={
-                'extra_data': {'response_preview': cleaned_response[:100]}
-            })
-
-            return f"[@{agent_name}]: {cleaned_response}"
-        except ValueError as e:
-            self._message_depth -= 1
-            self.logger.error(f"Failed to message {agent_name}: {e}")
-            return f"✗ {e}"
-        except Exception as e:
-            self._message_depth -= 1
-            self.logger.error(f"Error messaging {agent_name}: {e}", exc_info=True)
-            return f"✗ Error messaging {agent_name}: {e}"
 
     def _uses_harmony_format(self) -> bool:
         """Check if the model uses Harmony format (GPT-OSS models)."""
@@ -781,17 +625,6 @@ Current Context: Fresh start, no prior context
                 result = self.update_working_memory(text)
                 success = True
 
-            # Agent-to-agent communication
-            elif func_name == "message_agent":
-                agent_name = args.get("agent_name", "")
-                message = args.get("message", "")
-                if not agent_name or not message:
-                    result = "✗ message_agent requires 'agent_name' and 'message' arguments"
-                else:
-                    print(f"[{self.name}] → {agent_name}: {message[:60]}...")
-                    result = self.message_agent(agent_name, message)
-                    success = True
-
             # File and CLI tools
             elif self.tools:
                 if func_name == "read_file":
@@ -899,12 +732,6 @@ Current Context: Fresh start, no prior context
         """
         message_lower = user_message.lower()
 
-        # Agent communication patterns
-        if any(word in message_lower for word in ['tell', 'ask', 'message', 'send to']):
-            # Check if an agent name is mentioned
-            if any(word in message_lower for word in ['bob', 'alice', 'agent']):
-                return True, "HINT: Use the message_agent function to communicate with the other agent."
-
         # Memory operations
         if any(word in message_lower for word in ['save', 'remember', 'store']):
             return True, "HINT: Use save_memory to store this information."
@@ -999,7 +826,7 @@ Current Context: Fresh start, no prior context
         )
 
         # Execute any function calls and handle tool response loop
-        response, had_tool_calls = self._execute_function_calls_with_followup(response, messages)
+        response, _ = self._execute_function_calls_with_followup(response, messages)
 
         # Add response to FIFO
         self.fifo_queue.append({"role": "assistant", "content": response})

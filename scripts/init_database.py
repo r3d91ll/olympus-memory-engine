@@ -24,7 +24,7 @@ def main():
     print("=" * 70)
 
     # Connect to postgres to create database
-    print(f"\n1. Connecting to PostgreSQL via Unix socket...")
+    print("\n1. Connecting to PostgreSQL via Unix socket...")
     print(f"   Socket: {PG_HOST}, User: {PG_USER}")
     try:
         conn = psycopg.connect(
